@@ -63,7 +63,7 @@ for ((i=0; i<N; i++)); do
     export HYPERSPACE_SKIP_BUG_REPORT=1 HYPERSPACE_FORCE_EXIT_ON_FREEZE=1 HYPERSPACE_NO_DIALOGS=1
     if [ $WIN = 1 ]; then
       # Wine sees the Linux file system as drive Z:.
-      export FTL_COOP_USERDIR="Z:$C/user/" FTL_COOP_LOG="Z:$C/coop.log" WINEDLLOVERRIDES="xinput1_4=n,b"
+      export FTL_COOP_USERDIR="Z:$C/user/" FTL_COOP_LOG="Z:$C/coop.log" WINEDLLOVERRIDES="${WINEDLLOVERRIDES-xinput1_4=n,b}"
       # One prefix per copy (each copy runs in its own runtime container with its own wineserver), cloned from WINE_PFX.
       [ -d "$C/pfx" ] || cp -a --reflink=auto "$WINE_PFX" "$C/pfx"
       export STEAM_COMPAT_DATA_PATH="$C/pfx" STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_DIR" PROTON_LOG=${PROTON_LOG:-0}

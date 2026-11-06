@@ -8,10 +8,14 @@ FTL: Faster Than Light. It is not an official Hyperspace release. Changes from u
 a ws2_32 link line in `CMakeLists.txt`, and small edits in `src/Global.cpp`, `src/zhl/zhl.cpp` (`HYPERSPACE_NO_DIALOGS`)
 and `src/game/Utilities/Resources.cpp`.
 
-Status: **work in progress, not released.** Linux (Steam FTL 1.6.13) is tested; the Windows build (FTL 1.6.9)
-compiles and is checked against the 1.6.9 game file, but has not been run yet. Windows and Linux players cannot
-play together (different programs, so the simulations would differ); a Linux player can join Windows players by
-running the Windows game through Proton.
+Status: **work in progress, not released.** Tested with bots on Linux (Steam FTL 1.6.13, native) and on the
+Windows build (FTL 1.6.9) running under Proton Experimental on Linux; not yet on real Windows. Windows and Linux
+players cannot play together (different programs, so the simulations would differ); a Linux player can join
+Windows players by running the Windows game through Proton.
+
+Windows under Proton, 2026-11-06 (tests/coop/batch.sh with BATCH_WIN=1, all PASS): 2 copies fight, 4 copies fight
+own-crew, 2 specials, 2 keys, 2 captain (ffa and own-crew, with the captain resync), 4 and 8 copies chaos, late join
+(third player after 20 s), 80 ms simulated latency.
 
 ## How it works
 
@@ -40,7 +44,7 @@ Build for Windows:
 Roll FTL back to 1.6.9 with [FTL-Version-Rollback](https://github.com/FTL-Hyperspace/FTL-Version-Rollback), copy
 `Hyperspace.dll`, `xinput1_4.dll` and `coop-install.bat` from the zip next to `FTLGame.exe`, run `coop-install.bat`
 (checks the 1.6.9 SHA-1, writes `coop.cfg`), edit `coop.cfg`. `README-COOP.txt` in the zip is the player guide.
-Under Proton the proxy DLL usually also needs the launch option `WINEDLLOVERRIDES="xinput1_4=n,b" %command%` (not yet tried).
+Under Proton the launch option `WINEDLLOVERRIDES="xinput1_4=n,b" %command%` is required (without it Wine uses its own xinput1_4 and the mod does not load; checked with Proton Experimental).
 
 Windows specifics: `rand`/`srand` are taken over by pointing FTLGame.exe's msvcrt imports at the mod (15-bit
 results, as msvcrt's RAND_MAX); random32's state and the three `menu_pause` writes in `CommandGui::OnLoop` are found

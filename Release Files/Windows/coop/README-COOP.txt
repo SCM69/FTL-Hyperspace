@@ -26,4 +26,7 @@ Internet play: the host forwards TCP port 27890 on their router, or everyone joi
 Keys (host): F9 start now, F10 resync everyone, F11 switch ship sharing (free-for-all / own crew),
 F7 give selected crew to the next player. Jumps, event choices, store and upgrades are the host's.
 
+Linux players (Proton): the Windows game and these files work under Proton. In Steam, set FTL's launch
+options to:  WINEDLLOVERRIDES="xinput1_4=n,b" %command%
+
 Problems: coop.log in the FTL folder says what happened. Remove: run "coop-install.bat uninstall".
