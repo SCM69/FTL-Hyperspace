@@ -4,6 +4,9 @@
 #                      [-m ffa|owncrew] [-e seed] [-d x11|headless] [-t timeout s] [-p port] [-J late-join seconds]
 # LD_PRELOAD goes to FTL only (gamescope must not load Hyperspace).
 # Copies are hard-linked from <game dir>, each with its own save folder and logs under <out dir>/copyN.
+# Windows build under Proton: -s Hyperspace.dll and -g a Windows 1.6.9 game folder (FTLGame.exe at its top level).
+# Needs Proton (PROTON_DIR, default: Proton - Experimental) and the Steam Linux Runtime sniper (SNIPER_DIR); the Wine
+# prefix is WINE_PFX (default <game dir>/../pfx).
 set -u
 SO=""; GAME=""; OUT=""; N=2; FRAMES=1800; BOT=probe; MODE=ffa; SEED=4242; DISP=headless; TIMEOUT=240; PORT=27890
 SOLO=0; LATE=0
@@ -15,7 +18,18 @@ while getopts "s:g:o:n:f:b:m:e:d:t:p:1J:" opt; do
     *) echo "bad option"; exit 2;;
   esac
 done
-[ -f "$SO" ] && [ -d "$GAME/data" ] && [ -n "$OUT" ] || { echo "need -s .so -g game dir -o out dir"; exit 2; }
+WIN=0; [ -f "$GAME/FTLGame.exe" ] && WIN=1
+[ -f "$SO" ] && { [ -d "$GAME/data" ] || [ $WIN = 1 ]; } && [ -n "$OUT" ] || { echo "need -s .so -g game dir -o out dir"; exit 2; }
+if [ $WIN = 1 ]; then
+  STEAM_DIR=${STEAM_DIR:-$HOME/.local/share/Steam}
+  find_tool() { for l in "$STEAM_DIR" $(sed -n 's/.*"path"[[:space:]]*"\(.*\)".*/\1/p' "$STEAM_DIR/config/libraryfolders.vdf" 2>/dev/null); do
+    [ -d "$l/steamapps/common/$1" ] && { echo "$l/steamapps/common/$1"; return; }; done; }
+  PROTON_DIR=${PROTON_DIR:-$(find_tool "Proton - Experimental")}
+  SNIPER_DIR=${SNIPER_DIR:-$(find_tool SteamLinuxRuntime_sniper)}
+  WINE_PFX=${WINE_PFX:-$(readlink -m "$GAME/../pfx")}
+  [ -x "$PROTON_DIR/proton" ] && [ -x "$SNIPER_DIR/_v2-entry-point" ] || { echo "Proton or SteamLinuxRuntime_sniper not found"; exit 2; }
+  mkdir -p "$WINE_PFX"
+fi
 mkdir -p "$OUT"
 BUILD_ID="test-$(sha256sum "$SO" | cut -c1-12)"
 
@@ -32,16 +46,30 @@ for ((i=0; i<N; i++)); do
       language=en windowed=1 stretched=0 > "$f"
   done
   [ -d "$C/game" ] || cp -al "$GAME" "$C/game"
+  if [ $WIN = 1 ]; then
+    rm -f "$C/game/Hyperspace.dll" "$C/game/xinput1_4.dll"
+    cp "$SO" "$C/game/Hyperspace.dll"; cp "$(dirname "$0")/../../Release Files/Windows/mod/xinput1_4.dll" "$C/game/"
+    # Windows FTL reads settings.ini from its own folder (seen in a Wine file trace), not from the user folder.
+    rm -f "$C/game/settings.ini"; cp "$C/user/settings.ini" "$C/game/settings.ini"
+  fi
   if [ $SOLO = 1 ]; then ROLE=solo; elif [ $i = 0 ]; then ROLE=host; else ROLE=guest; fi
   (
-    cd "$C/game/data" || exit 3
+    if [ $WIN = 1 ]; then cd "$C/game" || exit 3; else cd "$C/game/data" || exit 3; fi
     export SteamAppId=212680 SteamGameId=212680 LC_NUMERIC=C
     export XDG_DATA_HOME="$C/user" FTL_COOP=$ROLE FTL_COOP_PORT=$PORT FTL_COOP_ADDR=127.0.0.1:$PORT
     PLAYERS=$N; [ "$LATE" != 0 ] && PLAYERS=$((N - 1))
     export FTL_COOP_NAME="bot$i" FTL_COOP_PLAYERS=$PLAYERS FTL_COOP_MODE=$MODE FTL_COOP_SEED=$SEED FTL_COOP_BOT=$BOT
     export FTL_COOP_USERDIR="$C/user/" FTL_COOP_LOG="$C/coop.log" FTL_COOP_EXIT_AFTER=$FRAMES FTL_COOP_BUILD_ID=$BUILD_ID
     export HYPERSPACE_SKIP_BUG_REPORT=1 HYPERSPACE_FORCE_EXIT_ON_FREEZE=1 HYPERSPACE_NO_DIALOGS=1
-    if [ -n "${FTL_COOP_GDB_COPY:-}" ] && [ "$FTL_COOP_GDB_COPY" = "$i" ]; then
+    if [ $WIN = 1 ]; then
+      # Wine sees the Linux file system as drive Z:.
+      export FTL_COOP_USERDIR="Z:$C/user/" FTL_COOP_LOG="Z:$C/coop.log" WINEDLLOVERRIDES="xinput1_4=n,b"
+      # One prefix per copy (each copy runs in its own runtime container with its own wineserver), cloned from WINE_PFX.
+      [ -d "$C/pfx" ] || cp -a --reflink=auto "$WINE_PFX" "$C/pfx"
+      export STEAM_COMPAT_DATA_PATH="$C/pfx" STEAM_COMPAT_CLIENT_INSTALL_PATH="$STEAM_DIR" PROTON_LOG=${PROTON_LOG:-0}
+      exec timeout -k 5 "$TIMEOUT" gamescope --backend headless -W 1280 -H 720 -w 1280 -h 720 -- \
+        "$SNIPER_DIR/_v2-entry-point" --verb=waitforexitandrun -- "$PROTON_DIR/proton" waitforexitandrun ./FTLGame.exe > "$C/stdout.log" 2>&1
+    elif [ -n "${FTL_COOP_GDB_COPY:-}" ] && [ "$FTL_COOP_GDB_COPY" = "$i" ]; then
       # Debug: this copy runs under gdb; the timeout's SIGINT stops it and gdb prints every thread's stack.
       exec timeout -k 10 -s INT "$TIMEOUT" gamescope --backend headless -W 1280 -H 720 -w 1280 -h 720 -- gdb -batch \
         -ex "set startup-with-shell off" -ex "set env LD_PRELOAD=$SO" -ex "handle SIGPIPE nostop noprint" -ex run \

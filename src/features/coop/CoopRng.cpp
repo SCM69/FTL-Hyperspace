@@ -118,7 +118,7 @@ static uint64_t* SilState()
         if (scan.Scan())
         {
             const unsigned char* c = (const unsigned char*)scan.GetAddress();
-            uint32_t hi, lo; memcpy(&hi, c + 3, 4); memcpy(&lo, c + 21, 4);
+            uint32_t hi, lo; memcpy(&hi, c + 3, 4); memcpy(&lo, c + 20, 4); // 55 | c7 05 hi imm32 | 89 e5 | 83 e4 f8 | 8b 45 08 | a3 lo
             if (hi == lo + 4) p = (uint64_t*)(uintptr_t)lo;
         }
 #else

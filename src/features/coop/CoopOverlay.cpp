@@ -5,7 +5,14 @@
 #include "CoopCommands.h"
 #include "Global.h"
 #include <ctime>
+#include <cstdio>
+#include <cstdlib>
 #include <deque>
+#include <vector>
+#ifdef _WIN32
+#include <windows.h>
+#endif
+#include <GL/gl.h>
 
 namespace CoopOverlay {
 
@@ -50,11 +57,32 @@ void Render()
 
 } // namespace CoopOverlay
 
+// Tests: FTL_COOP_SHOT_AT=<n> saves the frame drawn on render call n (and every n after it) as <coop log>.<n>.ppm.
+static void MaybeScreenshot()
+{
+    static int every = getenv("FTL_COOP_SHOT_AT") ? atoi(getenv("FTL_COOP_SHOT_AT")) : 0;
+    static int calls = 0;
+    if (every <= 0 || ++calls % every != 0) return;
+    GLint vp[4]; glGetIntegerv(GL_VIEWPORT, vp);
+    int w = vp[2], h = vp[3];
+    if (w <= 0 || h <= 0 || w > 8192 || h > 8192) return;
+    std::vector<unsigned char> px((size_t)w * h * 3);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadPixels(vp[0], vp[1], w, h, GL_RGB, GL_UNSIGNED_BYTE, px.data());
+    std::string path = CoopGame::GetConfig().logPath + "." + std::to_string(calls) + ".ppm";
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return;
+    fprintf(f, "P6\n%d %d\n255\n", w, h);
+    for (int y = h - 1; y >= 0; --y) fwrite(&px[(size_t)y * w * 3], 1, (size_t)w * 3, f);
+    fclose(f);
+}
+
 HOOK_METHOD_PRIORITY(CApp, OnRender, -2000, () -> void)
 {
     LOG_HOOK("HOOK_METHOD_PRIORITY -> CApp::OnRender -> Begin (CoopOverlay.cpp)\n")
     super();
     CoopOverlay::Render();
+    MaybeScreenshot();
 }
 
 // Own-crew mode: show which player commands each crew member (P1 = host). Same on every copy: owners are assigned in

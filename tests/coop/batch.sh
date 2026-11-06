@@ -4,8 +4,12 @@
 # Prints one line per test and a final tally; exit code 1 if any test failed.
 HERE=$(dirname "$(readlink -f "$0")")
 ROOT=$(readlink -f "$HERE/../..")
-GAME=$(readlink -f "$ROOT/../game-test")
-SO="$ROOT/build-linux-1.6.13-release/Hyperspace.1.6.13.amd64.so"
+# BATCH_WIN=1: the Windows build under Proton (game folder ../game-win, see run_copies.sh).
+if [ "${BATCH_WIN:-0}" = 1 ]; then
+  GAME=$(readlink -f "$ROOT/../game-win"); SO="$ROOT/build-windows-release/Hyperspace.dll"
+else
+  GAME=$(readlink -f "$ROOT/../game-test"); SO="$ROOT/build-linux-1.6.13-release/Hyperspace.1.6.13.amd64.so"
+fi
 PREFIX=$1; shift
 pass=0; fail=0; port=28200
 for t in "$@"; do
