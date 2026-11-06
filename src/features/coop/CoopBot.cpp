@@ -5,6 +5,7 @@
 #include "CoopCommands.h"
 #include "Global.h"
 #include <random>
+using coop::Writer;
 #include <cstdio>
 
 namespace CoopBot {
@@ -107,7 +108,41 @@ void BeforeFrame(uint32_t frame)
         }
     }
 
-    bool fight = cfg.bot == "fight";
+    bool fight = cfg.bot == "fight" || cfg.bot == "specials";
+    bool specials = cfg.bot == "specials";
+    // specials: the captain installs cloaking (10), battery (12), mind control (14), hacking (15) at the start (test
+    // command), then every copy uses them now and then.
+    if (specials && captain && frame >= 5 && frame <= 8)
+    {
+        static const int types[] = { 10, 12, 14, 15 };
+        Writer w; w.u8(CoopCommands::C_TEST_ADD_SYSTEM); w.u8((uint8_t)types[frame - 5]); CoopGame::SubmitLocal(w.b);
+    }
+    if (specials && frame > 60 && Rand(30) == 0)
+    {
+        ShipManager* en = G_->GetShipManager(1);
+        Writer w;
+        switch (Rand(5))
+        {
+        case 0: w.u8(CoopCommands::C_CLOAK); w.u8(1); break;
+        case 1: w.u8(CoopCommands::C_BATTERY); w.u8(1); w.u8(0); break;
+        case 2: w.u8(CoopCommands::C_HACK_PULSE); break;
+        case 3:
+            if (!en || en->vSystemList.empty()) break;
+            { ShipSystem* t = en->vSystemList[Rand((int)en->vSystemList.size())]; if (t) { w.u8(CoopCommands::C_HACK_TARGET); w.u8(1); w.u8((uint8_t)t->iSystemType); } }
+            break;
+        case 4:
+            if (!en || en->ship.vRoomList.empty()) break;
+            {
+                int room = Rand((int)en->ship.vRoomList.size());
+                std::vector<int> idx;
+                for (size_t i = 0; i < en->vCrewList.size(); ++i) if (en->vCrewList[i] && en->vCrewList[i]->iRoomId == room) idx.push_back((int)i);
+                w.u8(CoopCommands::C_MIND); w.u8(1); w.u16((uint16_t)room); w.u8((uint8_t)idx.size());
+                for (int i : idx) w.u16((uint16_t)i);
+            }
+            break;
+        }
+        if (!w.b.empty()) CoopGame::SubmitLocal(w.b);
+    }
     if (cfg.bot != "chaos" && !fight) return;
 
     // fight: keep the weapons system and every weapon powered (one command per second at most).

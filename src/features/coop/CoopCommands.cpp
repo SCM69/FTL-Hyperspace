@@ -11,6 +11,8 @@ using coop::Writer;
 namespace CoopCommands {
 
 static int g_inputDepth = 0;
+bool g_applyingTeleport = false;
+static bool g_inGuiLoop = false;
 bool InInput() { return g_inputDepth > 0; }
 struct InputScope { InputScope() { ++g_inputDepth; } ~InputScope() { --g_inputDepth; } };
 
@@ -164,6 +166,9 @@ bool Allowed(int slot, const Bytes& cmd, CoopGame::Mode mode, std::string* reaso
     uint8_t t = r.u8();
     switch (t)
     {
+    case C_TEST_ADD_SYSTEM:
+        if (!getenv("FTL_COOP_TEST")) { *reason = "test command"; return false; }
+        return slot == 0;
     case C_CHOICE: case C_ASSIGN_CREW: case C_SET_MODE: case C_JUMP:
         if (slot != 0) { *reason = "only the captain (host) can do that"; return false; }
         return true;
@@ -197,6 +202,11 @@ bool Allowed(int slot, const Bytes& cmd, CoopGame::Mode mode, std::string* reaso
         return MaySystem(slot, SystemOf(Ship(0), 4 /* drones */), reason);
     case C_FIRE: case C_WEAPON_CLEAR: case C_AUTOFIRE:
         return MaySystem(slot, SystemOf(Ship(0), 3 /* weapons */), reason);
+    case C_CLOAK: return MaySystem(slot, SystemOf(Ship(0), 10 /* cloaking */), reason);
+    case C_BATTERY: return MaySystem(slot, SystemOf(Ship(0), 12 /* battery */), reason);
+    case C_HACK_PULSE: case C_HACK_TARGET: return MaySystem(slot, SystemOf(Ship(0), 15 /* hacking */), reason);
+    case C_MIND: return MaySystem(slot, SystemOf(Ship(0), 14 /* mind */), reason);
+    case C_TELEPORT: return MaySystem(slot, SystemOf(Ship(0), 9 /* teleporter */), reason);
     case C_DOOR:
         return true; // doors stay shared in both modes
     default:
@@ -225,6 +235,13 @@ std::string Describe(const Bytes& cmd)
     case C_WEAPON_CLEAR: snprintf(buf, sizeof(buf), "clear weapon%d", r.u8()); break;
     case C_AUTOFIRE: snprintf(buf, sizeof(buf), "autofire %d", r.u8()); break;
     case C_JUMP: snprintf(buf, sizeof(buf), "jump to location %d", r.u16()); break;
+    case C_CLOAK: snprintf(buf, sizeof(buf), "cloak %d", r.u8()); break;
+    case C_BATTERY: snprintf(buf, sizeof(buf), "battery %d", r.u8()); break;
+    case C_HACK_PULSE: snprintf(buf, sizeof(buf), "hack pulse"); break;
+    case C_HACK_TARGET: { int sh = r.u8(); snprintf(buf, sizeof(buf), "hack ship%d sys%d", sh, r.u8()); break; }
+    case C_MIND: { int sh = r.u8(); int room = (int16_t)r.u16(); snprintf(buf, sizeof(buf), "mind control ship%d room%d n%d", sh, room, r.u8()); break; }
+    case C_TEST_ADD_SYSTEM: snprintf(buf, sizeof(buf), "test add system %d", r.u8()); break;
+    case C_TELEPORT: { int room = (int16_t)r.u16(); snprintf(buf, sizeof(buf), "teleport room%d command%d", room, r.i32()); break; }
     default: snprintf(buf, sizeof(buf), "unknown"); break;
     }
     return buf;
@@ -340,6 +357,58 @@ void Apply(int slot, const Bytes& cmd)
         if (gui && gui->shipScreens.bOpen) gui->shipScreens.Close();
         map.potentialLoc = loc;
         map.readyToTravel = true;
+        break;
+    }
+    case C_TEST_ADD_SYSTEM:
+    {
+        int type = r.u8();
+        ShipManager* sm = Ship(0);
+        if (sm && !SystemOf(sm, type)) { bool fit = sm->CanFitSystem(type); if (fit) sm->AddSystem(type); CoopGame::Log("test add system " + std::to_string(type) + (fit ? " ok" : " (no room)")); }
+        break;
+    }
+    case C_CLOAK:
+    {
+        bool on = r.u8() != 0;
+        ShipManager* sm = Ship(0);
+        if (sm && sm->cloakSystem) sm->cloakSystem->SetTurnedOn(on);
+        break;
+    }
+    case C_BATTERY:
+    {
+        bool on = r.u8() != 0; bool flag = r.u8() != 0;
+        ShipManager* sm = Ship(0);
+        if (sm && sm->batterySystem) sm->batterySystem->SetTurnedOn(on, flag);
+        break;
+    }
+    case C_HACK_PULSE:
+    {
+        ShipManager* sm = Ship(0);
+        if (sm && sm->hackingSystem) sm->hackingSystem->InitiatePulse();
+        break;
+    }
+    case C_HACK_TARGET:
+    {
+        int ship = r.u8(); int type = r.u8();
+        ShipManager* sm = Ship(0);
+        ShipSystem* target = SystemOf(Ship(ship), type);
+        if (sm && sm->hackingSystem && target) sm->hackingSystem->StartHacking(target);
+        break;
+    }
+    case C_MIND:
+    {
+        int ship = r.u8(); int room = (int16_t)r.u16(); int n = r.u8();
+        ShipManager* target = Ship(ship);
+        ShipManager* sm = Ship(0);
+        std::vector<CrewMember*> crew;
+        for (int k = 0; k < n; ++k) { CrewMember* c = CrewAt(target, r.u16()); if (c) crew.push_back(c); }
+        if (sm && sm->mindSystem) sm->mindSystem->QueueMindControl(&crew, room, ship);
+        break;
+    }
+    case C_TELEPORT:
+    {
+        int room = (int16_t)r.u16(); int command = r.i32();
+        CompleteShip* me = G_->GetWorld()->playerShip;
+        if (me) { CoopCommands::g_applyingTeleport = true; me->InitiateTeleport(room, command); CoopCommands::g_applyingTeleport = false; }
         break;
     }
     case C_ASSIGN_CREW:
@@ -566,4 +635,79 @@ HOOK_METHOD_PRIORITY(StarMap, MouseClick, 9000, (int mX, int mY) -> void)
         for (size_t i = 0; i < this->locations.size(); ++i)
             if (this->locations[i] == this->potentialLoc) CoopGame::SubmitLocal(CoopCommands::Jump((int)i));
     }
+}
+
+// ---------------------------------------------------------------- special systems
+
+HOOK_METHOD_PRIORITY(CloakingSystem, SetTurnedOn, 9000, (bool on) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> CloakingSystem::SetTurnedOn -> Begin (CoopCommands.cpp)\n")
+    if (ShouldTakeOver()) { Writer w; w.u8(C_CLOAK); w.u8(on ? 1 : 0); CoopGame::SubmitLocal(w.b); return; }
+    super(on);
+}
+
+HOOK_METHOD_PRIORITY(BatterySystem, SetTurnedOn, 9000, (bool on, bool tutorial) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> BatterySystem::SetTurnedOn -> Begin (CoopCommands.cpp)\n")
+    if (ShouldTakeOver()) { Writer w; w.u8(C_BATTERY); w.u8(on ? 1 : 0); w.u8(tutorial ? 1 : 0); CoopGame::SubmitLocal(w.b); return; }
+    super(on, tutorial);
+}
+
+HOOK_METHOD_PRIORITY(HackingSystem, InitiatePulse, 9000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> HackingSystem::InitiatePulse -> Begin (CoopCommands.cpp)\n")
+    if (ShouldTakeOver()) { Writer w; w.u8(C_HACK_PULSE); CoopGame::SubmitLocal(w.b); return; }
+    super();
+}
+
+HOOK_METHOD_PRIORITY(HackingSystem, StartHacking, 9000, (ShipSystem* sys) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> HackingSystem::StartHacking -> Begin (CoopCommands.cpp)\n")
+    if (ShouldTakeOver() && sys)
+    {
+        Writer w; w.u8(C_HACK_TARGET); w.u8((uint8_t)sys->_shipObj.iShipId); w.u8((uint8_t)sys->iSystemType);
+        CoopGame::SubmitLocal(w.b);
+        return;
+    }
+    super(sys);
+}
+
+HOOK_METHOD_PRIORITY(MindSystem, QueueMindControl, 9000, (std::vector<CrewMember*>* crew, int roomId, int shipId) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> MindSystem::QueueMindControl -> Begin (CoopCommands.cpp)\n")
+    if (ShouldTakeOver() && crew)
+    {
+        ShipManager* target = CoopCommands::Ship(shipId);
+        Writer w; w.u8(C_MIND); w.u8((uint8_t)shipId); w.u16((uint16_t)(int16_t)roomId);
+        std::vector<int> idx;
+        for (CrewMember* c : *crew) { int i = CoopCommands::CrewIndex(target, c); if (i >= 0) idx.push_back(i); }
+        w.u8((uint8_t)idx.size());
+        for (int i : idx) w.u16((uint16_t)i);
+        CoopGame::SubmitLocal(w.b);
+        return;
+    }
+    super(crew, roomId, shipId);
+}
+
+// The teleporter is started from CommandGui::OnLoop (from the local UI's teleport selection), not from an input
+// handler: take over InitiateTeleport on the player ship while CommandGui::OnLoop runs.
+HOOK_METHOD_PRIORITY(CommandGui, OnLoop, 9000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> CommandGui::OnLoop -> Begin (CoopCommands.cpp)\n")
+    CoopCommands::g_inGuiLoop = true;
+    super();
+    CoopCommands::g_inGuiLoop = false;
+}
+
+HOOK_METHOD_PRIORITY(CompleteShip, InitiateTeleport, 9000, (int targetRoom, int command) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> CompleteShip::InitiateTeleport -> Begin (CoopCommands.cpp)\n")
+    if (CoopGame::InLockstep() && CoopCommands::g_inGuiLoop && !CoopCommands::g_applyingTeleport && !CoopGame::Applying() &&
+        this == G_->GetWorld()->playerShip)
+    {
+        Writer w; w.u8(C_TELEPORT); w.u16((uint16_t)(int16_t)targetRoom); w.i32(command);
+        CoopGame::SubmitLocal(w.b);
+        return;
+    }
+    super(targetRoom, command);
 }

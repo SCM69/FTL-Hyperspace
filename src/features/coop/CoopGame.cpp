@@ -154,6 +154,12 @@ static void HashShip(coop::Hasher& h, ShipManager* s, bool detailCrew)
         for (ProjectileFactory* w : s->weaponSystem->weapons) { if (w) { h.val(w->cooldown.first); h.val(w->powered); h.val(w->autoFiring); h.val(w->targetId); h.val((uint32_t)w->targets.size()); } }
     if (detailCrew)
         for (CrewMember* c : s->vCrewList) { if (c) { h.val(c->x); h.val(c->y); h.val(c->health.first); h.val(c->iRoomId); } }
+    for (CrewMember* c : s->vCrewList) if (c) { h.val(c->bMindControlled); h.val(c->bDead); }
+    if (s->cloakSystem) { h.val(s->cloakSystem->bTurnedOn); h.val(s->cloakSystem->timer.currTime); }
+    if (s->batterySystem) { h.val(s->batterySystem->bTurnedOn); h.val(s->batterySystem->timer.currTime); }
+    if (s->hackingSystem) { h.val(s->hackingSystem->bHacking); h.val(s->hackingSystem->effectTimer.first); h.val(s->hackingSystem->spendDrone); }
+    if (s->mindSystem) { h.val(s->mindSystem->controlTimer.first); h.val(s->mindSystem->iQueuedTarget); h.val(s->mindSystem->iQueuedShip); }
+    if (s->droneSystem) for (Drone* d : s->droneSystem->drones) if (d) h.val(d->powered);
     for (Room* r : s->ship.vRoomList) { (void)r; }
     for (Door* d : s->ship.vDoorList) { if (d) { h.val(d->bOpen); h.val(d->health); } }
 }
@@ -517,6 +523,8 @@ static void Quit(const char* why)
 // Called from the CApp::OnLoop hook. Returns how many game frames to run now (0 = stall).
 int BeforeLoop()
 {
+    static uint32_t loopsTotal = 0;
+    if (++loopsTotal % 1800 == 0 && g_session) Logf("heartbeat loop=%u frame=%u lockstep=%d stage=%d", loopsTotal, g_session->Frame(), (int)g_inLockstep, (int)g_startStage);
     static bool inited = false;
     if (!inited) { inited = true; CoopRng::MarkMainThread(); InitSession(); }
     if (!Active() || !g_session) return 1;
@@ -545,7 +553,13 @@ int BeforeLoop()
 
 bool RunFrameBegin()
 {
-    if (!g_session->BeginFrame()) return false;
+    static uint32_t hostStall = 0;
+    if (!g_session->BeginFrame())
+    {
+        if (g_session->IsHost() && ++hostStall % 300 == 0) Log("STALL: host waiting for a slow player at frame " + std::to_string(g_session->Frame()));
+        return false;
+    }
+    hostStall = 0;
     SetSharedMenuPause();
     CoopBot::BeforeFrame(g_session->Frame());
     return true;
@@ -594,8 +608,14 @@ HOOK_METHOD_PRIORITY(CApp, OnLoop, -1000, () -> void)
     if (hitch > 0 && !CoopGame::GetSession()->IsHost() && (++hitchLoop % 97) < hitch) return;
     // Lockstep: the host is the clock and runs one frame per loop. A guest runs the next frame when its bundle
     // is here, and up to 3 extra frames when it has fallen behind (more bundles waiting than the input delay).
+    static uint32_t stallLoops = 0;
     for (int i = 0; i < 4; ++i)
     {
+        if (i == 0 && CoopGame::GetSession()->ReadyAhead() == 0 && !CoopGame::GetSession()->IsHost())
+        {
+            if (++stallLoops % 300 == 0) CoopGame::Log("STALL: no bundle for frame " + std::to_string(CoopGame::GetSession()->Frame()) + " for " + std::to_string(stallLoops) + " loops");
+        }
+        else if (i == 0) stallLoops = 0;
         if (i > 0 && (CoopGame::GetSession()->IsHost() || CoopGame::GetSession()->ReadyAhead() <= CoopGame::GetConfig().delay + 1)) break;
         if (!RunFrameBegin()) break;
         if (i > 0) ++CoopGame::g_catchupFrames;

@@ -20,6 +20,13 @@ enum Type : uint8_t
     C_WEAPON_CLEAR = 11, // u8 weapon index
     C_AUTOFIRE = 12,     // u8 on
     C_JUMP = 13,         // u16 location index in StarMap::locations. Captain only.
+    C_CLOAK = 14,        // u8 on
+    C_BATTERY = 15,      // u8 on, u8 flag
+    C_HACK_PULSE = 16,   // -
+    C_HACK_TARGET = 17,  // u8 target ship id, u8 system type
+    C_MIND = 18,         // u8 ship id, i16 room, u8 n, n x u16 crew index (in that ship's crew list)
+    C_TELEPORT = 19,     // i16 target room, i32 command (CombatControl teleport command)
+    C_TEST_ADD_SYSTEM = 100, // u8 system type (tests only: FTL_COOP_TEST=1)
 };
 
 // Is an input event (click, key) being handled right now? Only then are actions taken over.

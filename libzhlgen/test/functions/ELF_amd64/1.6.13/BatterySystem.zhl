@@ -1,0 +1,2 @@
+"41544189f45589d5534889fb4883ec40":  // unique sig
+cleanup __amd64 void BatterySystem::SetTurnedOn(BatterySystem *this, bool on, bool tutorial); // 0063cf60 DWARF original prototype
