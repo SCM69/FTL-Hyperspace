@@ -30,7 +30,8 @@ static std::unique_ptr<coop::Session> g_session;
 static bool g_applying = false;
 static bool g_inLockstep = false;
 static bool g_quitRequested = false;
-uint32_t g_catchupFrames = 0;   // extra frames run in the same loop (guest catching up)
+uint32_t g_catchupFrames = 0;
+static uint32_t g_totalFramesAtRestart = 0; // frames run in earlier epochs   // extra frames run in the same loop (guest catching up)
 
 static const float FIXED_SPEED = 16.0f / 60.0f; // FTL: 16 speed units per second, 60 lockstep frames per second
 
@@ -92,6 +93,9 @@ const Config& GetConfig()
     g_cfg.delay = (uint32_t)atoi(get("FTL_COOP_DELAY", "delay", "4").c_str());
     g_cfg.window = (uint32_t)atoi(get("FTL_COOP_WINDOW", "window", "12").c_str());
     g_cfg.hashEvery = (uint32_t)atoi(get("FTL_COOP_HASH_EVERY", "hash_every", "30").c_str());
+    g_cfg.autoResync = get("FTL_COOP_AUTO_RESYNC", "auto_resync", "1") == "1";
+    g_cfg.startContinue = get("FTL_COOP_START", "start", "new") == "continue";
+    g_cfg.testResyncAt = (uint32_t)strtoul(get("FTL_COOP_TEST_RESYNC_AT", "test_resync_at", "0").c_str(), nullptr, 10);
     return g_cfg;
 }
 
@@ -106,7 +110,8 @@ void Log(const std::string& line)
     if (!g_log && Active()) g_log = fopen(GetConfig().logPath.c_str(), "w");
     if (!g_log) return;
     uint32_t f = g_session ? g_session->Frame() : 0;
-    fprintf(g_log, "[%.3f f%u] %s\n", (double)clock() / CLOCKS_PER_SEC, f, line.c_str());
+    uint32_t e = g_session ? g_session->Epoch() : 0;
+    fprintf(g_log, "[%.3f f%u e%u] %s\n", (double)clock() / CLOCKS_PER_SEC, f, e, line.c_str());
     fflush(g_log);
 }
 
@@ -217,20 +222,68 @@ static void SetSharedMenuPause()
 
 // ---------------------------------------------------------------- start of a run
 
-enum class StartStage { None, OpenBuilder, Finish, WaitInGame };
+enum class StartStage { None, OpenBuilder, Finish, LoadToMenu, LoadFile, WaitInGame };
 static StartStage g_startStage = StartStage::None;
 static int g_startWait = 0;
-struct StartInfo { unsigned seed = 0; int shipType = 0, variant = 0; Mode mode = Mode::FreeForAll; uint8_t players = 1; };
+enum StartKind : uint8_t { START_NEW = 0, START_LOAD = 1 };
+struct StartInfo { uint8_t kind = START_NEW; unsigned seed = 0; int shipType = 0, variant = 0; Mode mode = Mode::FreeForAll;
+                   uint8_t players = 1; coop::Bytes save; std::vector<int8_t> owners; };
 static StartInfo g_start;
+static uint32_t g_resyncs = 0;
+
+static unsigned NewSeed()
+{
+    unsigned seed = GetConfig().seed;
+    if (!seed || g_resyncs) seed = (unsigned)time(nullptr) ^ (unsigned)clock() ^ (g_resyncs * 2654435761u) ^ GetConfig().seed;
+    return seed ? seed : 1;
+}
 
 static coop::Bytes MakeStartBlob()
 {
-    unsigned seed = GetConfig().seed;
-    if (!seed) seed = (unsigned)time(nullptr) ^ (unsigned)clock();
     coop::Writer w;
-    w.u32(seed); w.u8((uint8_t)GetConfig().shipType); w.u8((uint8_t)GetConfig().shipVariant);
-    w.u8((uint8_t)GetConfig().mode); w.u8((uint8_t)(g_session ? g_session->PlayerCount() : 1));
+    w.u8(START_NEW); w.u32(NewSeed()); w.u8((uint8_t)GetConfig().shipType); w.u8((uint8_t)GetConfig().shipVariant);
+    w.u8((uint8_t)g_start.mode); w.u8((uint8_t)(g_session ? g_session->PlayerCount() : 1));
+    w.u16(0);
     return w.b;
+}
+
+static bool ReadFile(const std::string& path, coop::Bytes& out)
+{
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f) return false;
+    out.clear();
+    unsigned char buf[65536]; size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) out.insert(out.end(), buf, buf + n);
+    fclose(f);
+    return true;
+}
+
+static bool WriteFile(const std::string& path, const coop::Bytes& data)
+{
+    FILE* f = fopen(path.c_str(), "wb");
+    if (!f) return false;
+    bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
+    return fclose(f) == 0 && ok;
+}
+
+// Blob for "everyone loads this save": used to continue a saved run, to resync after a desync, after a late join.
+static bool MakeLoadBlob(coop::Bytes& blob, std::string* err)
+{
+    std::string path = FileHelper::getSaveFile();
+    coop::Bytes save;
+    if (!ReadFile(path, save) || save.empty()) { *err = "no save file at " + path; return false; }
+    coop::Writer w;
+    w.u8(START_LOAD); w.u32(NewSeed()); w.u8(0); w.u8(0);
+    w.u8((uint8_t)g_start.mode); w.u8((uint8_t)(g_session ? g_session->PlayerCount() : 1));
+    // Crew ownership survives the reload (by crew index on the player ship).
+    std::vector<int8_t> owners;
+    if (ShipManager* s = G_->GetWorld() && G_->GetWorld()->playerShip ? G_->GetShipManager(0) : nullptr)
+        for (CrewMember* c : s->vCrewList) owners.push_back((int8_t)CrewOwner(c));
+    w.u16((uint16_t)owners.size());
+    for (int8_t o : owners) w.u8((uint8_t)o);
+    w.bytes(save);
+    blob = w.b;
+    return true;
 }
 
 // ---------------------------------------------------------------- adapter
@@ -261,21 +314,38 @@ public:
     void OnStart(const coop::Bytes& blob) override
     {
         coop::Reader r(blob);
-        g_start.seed = r.u32(); g_start.shipType = r.u8(); g_start.variant = r.u8();
+        g_start.kind = r.u8(); g_start.seed = r.u32(); g_start.shipType = r.u8(); g_start.variant = r.u8();
         g_start.mode = (Mode)r.u8(); g_start.players = r.u8();
-        Logf("START seed=%u ship=%d variant=%d mode=%d players=%d", g_start.seed, g_start.shipType, g_start.variant,
-             (int)g_start.mode, g_start.players);
+        g_start.owners.clear();
+        uint16_t no = r.u16();
+        for (uint16_t i = 0; i < no; ++i) g_start.owners.push_back((int8_t)r.u8());
+        g_start.save = g_start.kind == START_LOAD ? r.bytes() : coop::Bytes();
+        Logf("START kind=%s seed=%u ship=%d variant=%d mode=%d players=%d save=%zu bytes epoch=%u",
+             g_start.kind == START_LOAD ? "load" : "new", g_start.seed, g_start.shipType, g_start.variant,
+             (int)g_start.mode, g_start.players, g_start.save.size(), g_session ? g_session->Epoch() : 0);
         CoopCommands::OnRunStart(g_start.players);
-        g_startStage = StartStage::OpenBuilder;
+        if (g_inLockstep && g_session) g_totalFramesAtRestart += g_session->Frame();
+        g_inLockstep = false; // until this copy is in the (re)started game
+        g_startStage = g_start.kind == START_LOAD ? StartStage::LoadToMenu : StartStage::OpenBuilder;
         g_startWait = 0;
     }
     void OnDesync(uint32_t frame, int slot, uint64_t mine, uint64_t theirs) override
     {
         Logf("DESYNC frame=%u slot=%d mine=%016llx theirs=%016llx", frame, slot, (unsigned long long)mine, (unsigned long long)theirs);
+        if (g_session && g_session->IsHost() && GetConfig().autoResync) RequestResync("desync");
     }
     void OnReject(const std::string& reason) override { Log("REJECTED " + reason); CoopCommands::ShowMessage("Not allowed: " + reason); }
-    void OnPlayerJoined(int slot, const std::string& name) override { Logf("JOIN slot=%d name=%s", slot, name.c_str()); }
-    void OnPlayerLeft(int slot) override { Logf("LEAVE slot=%d", slot); }
+    void OnPlayerJoined(int slot, const std::string& name) override
+    {
+        Logf("JOIN slot=%d name=%s", slot, name.c_str());
+        CoopOverlay::Post(name + " joined as player " + std::to_string(slot + 1));
+        if (g_session && g_session->IsHost() && g_inLockstep) RequestResync("late join");
+    }
+    void OnPlayerLeft(int slot) override
+    {
+        Logf("LEAVE slot=%d", slot);
+        CoopOverlay::Post(slot == 0 ? "Lost the connection to the host" : "Player " + std::to_string(slot + 1) + " left");
+    }
 };
 static GameAdapter g_adapter;
 
@@ -315,6 +385,8 @@ static void InitSession()
     g_transport.reset(new coop::TcpTransport());
     // The session installs the transport callbacks, so it must exist before Connect (which says hello).
     g_session.reset(new coop::Session(g_transport.get(), &g_adapter, s, c.host, c.name));
+    g_session->SetAllowLateJoin(true);
+    g_start.mode = c.mode;
     std::string err;
     bool ok = c.host ? (Env("FTL_COOP") == "solo" ? true : g_transport->Listen(c.port, &err))
                      : g_transport->Connect(c.addr, c.port, &err);
@@ -352,6 +424,28 @@ static void StepStart()
         Log("ship builder finished");
         g_startStage = StartStage::WaitInGame; g_startWait = 0;
     }
+    else if (g_startStage == StartStage::LoadToMenu)
+    {
+        // Back to the main menu first (the game auto-saves when its menu opens over a game; wait for that).
+        if (!menu.bOpen) { menu.Open(); g_startWait = 0; return; }
+        if (g_startWait < 3) return;
+        g_startStage = StartStage::LoadFile; g_startWait = 0;
+    }
+    else if (g_startStage == StartStage::LoadFile)
+    {
+        // Same as the main menu's Continue: TutorialManager::Stop, WorldManager::LoadGame, MainMenu::Close.
+        std::string path = FileHelper::getSaveFile();
+        if (!WriteFile(path, g_start.save)) { Log("ERROR: cannot write " + path); g_startStage = StartStage::None; return; }
+        CoopRng::Own(true);
+        CoopRng::SetState(g_start.seed);
+        CoopRng::SetSil(g_start.seed);
+        SetSeed(g_start.seed);
+        G_->GetTutorialManager()->Stop();
+        G_->GetWorld()->LoadGame(path);
+        menu.Close();
+        Log("save loaded: " + std::to_string(g_start.save.size()) + " bytes");
+        g_startStage = StartStage::WaitInGame; g_startWait = 0;
+    }
     else if (g_startStage == StartStage::WaitInGame && InGame())
     {
         // Same seeds again at the first lockstep frame: anything consumed while loading is forgotten.
@@ -361,6 +455,7 @@ static void StepStart()
         G_->GetCFPS()->RunningTime = 0.f;
         g_inLockstep = true;
         g_startStage = StartStage::None;
+        for (size_t i = 0; i < g_start.owners.size(); ++i) SetCrewOwner((int)i, g_start.owners[i]);
         Logf("in game, lockstep frames begin (waited %d loops)", g_startWait);
     }
 }
@@ -373,9 +468,34 @@ static void HostMaybeStart()
     if (want > 0 && g_session->PlayerCount() >= want)
     {
         Logf("all %d players present, starting", want);
-        g_session->Start(MakeStartBlob());
+        coop::Bytes blob; std::string err;
+        if (GetConfig().startContinue && MakeLoadBlob(blob, &err)) g_session->Start(blob);
+        else
+        {
+            if (GetConfig().startContinue) Log("no save to continue (" + err + "), starting a new run");
+            g_session->Start(MakeStartBlob());
+        }
     }
 }
+
+void RequestResync(const char* why)
+{
+    if (!g_session || !g_session->IsHost() || !g_inLockstep) return;
+    static clock_t last = 0;
+    clock_t now = clock();
+    if (last && (double)(now - last) / CLOCKS_PER_SEC < 2.0 && strcmp(why, "late join") != 0) return; // no resync storms
+    last = now;
+    G_->GetWorld()->SaveGame();
+    coop::Bytes blob; std::string err;
+    if (!MakeLoadBlob(blob, &err)) { Log(std::string("ERROR: resync failed: ") + err); return; }
+    ++g_resyncs;
+    Logf("RESYNC #%u (%s): everyone reloads the host's save", g_resyncs, why);
+    CoopOverlay::Post(std::string("Resyncing everyone from the host's save (") + why + ")");
+    g_session->Restart(blob);
+}
+
+Mode CurrentMode() { return g_start.mode; }
+void SetCurrentMode(Mode m) { g_start.mode = m; }
 
 void RequestManualStart()
 {
@@ -387,9 +507,9 @@ static void Quit(const char* why)
 {
     if (g_quitRequested) return;
     g_quitRequested = true;
-    Logf("SUMMARY frames=%u desyncs=%u stalls=%u players=%d catchup=%u reason=%s", g_session ? g_session->Frame() : 0,
+    Logf("SUMMARY frames=%u desyncs=%u stalls=%u players=%d catchup=%u resyncs=%u reason=%s", g_session ? g_session->Frame() : 0,
          g_session ? g_session->DesyncCount() : 0, g_session ? g_session->StallFrames() : 0,
-         g_session ? g_session->PlayerCount() : 0, g_catchupFrames, why);
+         g_session ? g_session->PlayerCount() : 0, g_catchupFrames, g_resyncs, why);
     Logf("RNG foreign-thread rand calls: %u [%s] random32: %u", CoopRng::ForeignCalls(), CoopRng::ForeignCallers().c_str(), CoopRng::g_r32Foreign);
     G_->GetCApp()->OnRequestExit();
 }
@@ -436,7 +556,23 @@ void RunFrameEnd()
     G_->GetCFPS()->SpeedFactor = FIXED_SPEED; // in case something in the frame recomputed it
     g_session->EndFrame();
     uint32_t f = g_session->Frame();
-    if (GetConfig().exitAfterFrames && f >= GetConfig().exitAfterFrames) Quit("exit_after reached");
+    static bool testResyncDone = false;
+    if (GetConfig().testResyncAt && !testResyncDone && g_session->IsHost() && f == GetConfig().testResyncAt)
+    {
+        testResyncDone = true;
+        RequestResync("test");
+        return;
+    }
+    // Tests: total frames over all epochs (a resync starts frame numbers again).
+    static uint32_t framesBefore = 0, lastEpoch = 1;
+    if (g_session->Epoch() != lastEpoch) { lastEpoch = g_session->Epoch(); framesBefore = g_totalFramesAtRestart; }
+    // Tests: FTL_COOP_EXIT_EPOCH=N counts only frames of epoch N and later (late-join tests).
+    static uint32_t exitEpoch = getenv("FTL_COOP_EXIT_EPOCH") ? (uint32_t)atoi(getenv("FTL_COOP_EXIT_EPOCH")) : 0;
+    if (exitEpoch)
+    {
+        if (g_session->Epoch() >= exitEpoch && GetConfig().exitAfterFrames && f >= GetConfig().exitAfterFrames) Quit("exit_after reached");
+    }
+    else if (GetConfig().exitAfterFrames && framesBefore + f >= GetConfig().exitAfterFrames) Quit("exit_after reached");
 }
 
 bool FramesQueued() { return g_session && g_session->Started(); }
@@ -515,6 +651,12 @@ HOOK_METHOD(CApp, OnKeyDown, (SDLKey key) -> void)
 {
     LOG_HOOK("HOOK_METHOD -> CApp::OnKeyDown -> Begin (CoopGame.cpp)\n")
     if (CoopGame::Active() && key == SDLK_F9) { CoopGame::RequestManualStart(); return; }
+    if (CoopGame::Active() && key == SDLK_F10) { CoopGame::RequestResync("F10"); return; }
+    if (CoopGame::Active() && key == SDLK_F11 && CoopGame::GetSession() && CoopGame::GetSession()->IsHost())
+    {
+        CoopGame::SubmitLocal(CoopCommands::SetMode(CoopGame::CurrentMode() == CoopGame::Mode::OwnCrew ? CoopGame::Mode::FreeForAll : CoopGame::Mode::OwnCrew));
+        return;
+    }
     super(key);
 }
 

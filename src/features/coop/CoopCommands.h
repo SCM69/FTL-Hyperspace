@@ -44,6 +44,7 @@ coop::Bytes Fire(int weaponIndex, int targetShip, bool autoFire, const std::vect
 coop::Bytes WeaponClear(int weaponIndex);
 coop::Bytes AutoFire(bool on);
 coop::Bytes Jump(int locationIndex);
+coop::Bytes SetMode(CoopGame::Mode m);
 
 } // namespace CoopCommands
 
@@ -53,4 +54,10 @@ void BeforeFrame(uint32_t frame);
 
 namespace CoopGame {
 void RequestManualStart();
+Mode CurrentMode();
+void SetCurrentMode(Mode m);
+}
+
+namespace CoopOverlay {
+void Post(const std::string& text);
 }

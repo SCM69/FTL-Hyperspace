@@ -35,6 +35,7 @@ Bytes Fire(int weapon, int target, bool autoFire, const std::vector<Pointf>& pts
     return w.b;
 }
 Bytes WeaponClear(int weapon) { Writer w; w.u8(C_WEAPON_CLEAR); w.u8((uint8_t)weapon); return w.b; }
+Bytes SetMode(CoopGame::Mode m) { Writer w; w.u8(C_SET_MODE); w.u8((uint8_t)m); return w.b; }
 Bytes Jump(int loc) { Writer w; w.u8(C_JUMP); w.u16((uint16_t)loc); return w.b; }
 Bytes AutoFire(bool on) { Writer w; w.u8(C_AUTOFIRE); w.u8(on ? 1 : 0); return w.b; }
 Bytes AssignCrew(int crew, int slot) { Writer w; w.u8(C_ASSIGN_CREW); w.u16((uint16_t)crew); w.u8((uint8_t)(int8_t)slot); return w.b; }
@@ -347,6 +348,13 @@ void Apply(int slot, const Bytes& cmd)
         CoopGame::SetCrewOwner(idx, s);
         break;
     }
+    case C_SET_MODE:
+    {
+        CoopGame::Mode m = (CoopGame::Mode)r.u8();
+        CoopGame::SetCurrentMode(m);
+        CoopOverlay::Post(m == CoopGame::Mode::OwnCrew ? "Ship sharing: each player commands their own crew" : "Ship sharing: free-for-all");
+        break;
+    }
     default: break;
     }
 }
@@ -354,6 +362,7 @@ void Apply(int slot, const Bytes& cmd)
 void ShowMessage(const std::string& text)
 {
     CoopGame::Log("MSG " + text);
+    CoopOverlay::Post(text);
     CommandGui* gui = G_ && G_->GetCApp() && G_->GetCApp()->world ? G_->GetWorld()->commandGui : nullptr;
     if (gui) gui->crewControl.StartCrewMessage(text);
 }

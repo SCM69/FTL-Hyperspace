@@ -5,7 +5,7 @@ import bisect, re, sys
 def load(p):
     out, frame = {}, None
     for l in open(p, errors="replace"):
-        m = re.search(r"f(\d+)\] HASH all=(\w+) rng=(\w+)", l)
+        m = re.search(r"f(\d+)(?: e\d+)?\] HASH all=(\w+) rng=(\w+)", l)
         if m:
             frame = int(m.group(1)); out[frame] = {"rng": m.group(3), "calls": {}}
         elif "RNGTRACE" in l and frame is not None:

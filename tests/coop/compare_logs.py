@@ -7,31 +7,34 @@ import os
 import re
 import sys
 
-HASH = re.compile(r"\[[\d.]+ f(\d+)\] HASH (.*)")
+HASH = re.compile(r"\[[\d.]+ f(\d+)(?: e(\d+))?\] HASH (.*)")
 SUMMARY = re.compile(r"SUMMARY frames=(\d+) desyncs=(\d+) stalls=(\d+) players=(\d+)")
+RESYNC = re.compile(r"RESYNC #(\d+)")
 
 
 def parse(path):
-    hashes, summary, desync, errors, applies = {}, None, 0, [], 0
+    hashes, summary, desync, errors, applies, summary_line = {}, None, 0, [], 0, ""
     if not os.path.exists(path):
         return None
     with open(path, errors="replace") as f:
         for line in f:
             m = HASH.search(line)
             if m:
-                parts = dict(kv.split("=") for kv in m.group(2).split())
-                hashes[int(m.group(1))] = parts
+                parts = dict(kv.split("=") for kv in m.group(3).split())
+                hashes[(int(m.group(2) or 0), int(m.group(1)))] = parts
                 continue
             m = SUMMARY.search(line)
             if m:
                 summary = tuple(int(x) for x in m.groups())
+                summary_line = line
             if "DESYNC" in line or "host reports desync" in line:
                 desync += 1
             if "ERROR" in line:
                 errors.append(line.strip())
             if " APPLY " in line:
                 applies += 1
-    return {"hashes": hashes, "summary": summary, "desync": desync, "errors": errors, "applies": applies}
+    return {"hashes": hashes, "summary": summary, "desync": desync, "errors": errors, "applies": applies,
+            "summary_line": summary_line}
 
 
 def main():
@@ -47,7 +50,7 @@ def main():
         print(f"copy{i}: summary={s} hash_frames={len(lg['hashes'])} applied_cmds={lg['applies']} desync_lines={lg['desync']}")
         for e in lg["errors"][:5]:
             print(f"  {e}")
-        if not s or s[0] < frames:
+        if not s or "exit_after reached" not in lg.get("summary_line", ""):
             ok = False
             print(f"  copy{i} did not reach frame {frames}")
         if lg["desync"]:
