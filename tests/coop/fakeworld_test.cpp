@@ -11,6 +11,8 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <ctime>
+#include <unistd.h>
 
 using namespace coop;
 
@@ -292,6 +294,47 @@ int main()
             if (gs.BeginFrame()) { gw.Step(); gs.EndFrame(); }
         }
         CHECK(hw.restarts > 0 && hs.Epoch() == gs.Epoch() && hs.Frame() >= 200, "restart from inside OnDesync: no crash, copies continue in the same epoch");
+    }
+
+    // 10. Latency: 60 ms one-way on every link, frames paced at 60 per second. The host must measure the round trip
+    //     (~120 ms) and raise the input delay to cover the one-way trip (>= 6 frames); copies stay in sync.
+    {
+        Settings st; st.buildId = "test"; st.delay = 4; st.window = 12; st.hashEvery = 15;
+        TcpTransport ht, g1, g2; ToyWorld hw, w1, w2; std::string err;
+        ht.Listen(0, &err);
+        ht.SetTestLatencyMs(60); g1.SetTestLatencyMs(60); g2.SetTestLatencyMs(60);
+        Session hs(&ht, &hw, st, true, "h"), s1(&g1, &w1, st, false, "a"), s2(&g2, &w2, st, false, "b");
+        g1.Connect("127.0.0.1", ht.ListenPort(), &err); g2.Connect("127.0.0.1", ht.ListenPort(), &err);
+        for (int i = 0; i < 400; ++i) { hs.Poll(); s1.Poll(); s2.Poll(); usleep(1000); }
+        Writer b; b.u64(9); b.u8(0); b.u8(3); for (int k = 0; k < 17; ++k) b.u32(0);
+        hs.Start(b.b);
+        Session* ss[3] = { &hs, &s1, &s2 }; ToyWorld* ws[3] = { &hw, &w1, &w2 };
+        timespec t0; clock_gettime(CLOCK_MONOTONIC, &t0);
+        for (int loop = 0; loop < 600 * 4 && (hs.Frame() < 600 || s1.Frame() < 600 || s2.Frame() < 600); ++loop)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                ss[i]->Poll();
+                if (ss[i]->Frame() >= 600) continue;
+                if (ss[i]->Started() && rand() % 8 == 0) { Bytes m; m.push_back('M'); m.push_back((uint8_t)(rand() % 8)); m.push_back(1); ss[i]->Submit(m); }
+                // A guest may run a few frames in one loop to catch up, like the game does.
+                for (int k = 0; k < (i == 0 ? 1 : 4); ++k)
+                {
+                    if (k > 0 && ss[i]->ReadyAhead() <= hs.CurrentDelay() + 1) break;
+                    if (!ss[i]->BeginFrame()) break;
+                    ws[i]->Step(); ss[i]->EndFrame();
+                }
+            }
+            usleep(16667);
+        }
+        for (int i = 0; i < 300; ++i) { hs.Poll(); s1.Poll(); s2.Poll(); usleep(1000); }
+        timespec t1; clock_gettime(CLOCK_MONOTONIC, &t1);
+        double secs = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+        char msg[200];
+        snprintf(msg, sizeof(msg), "60 ms latency: rtt %.0f ms -> delay %u window %u; 600 frames in %.1f s; desyncs %u",
+                 hs.RttMs(), hs.CurrentDelay(), hs.CurrentWindow(), secs, hs.DesyncCount());
+        CHECK(hs.Frame() >= 600 && s1.Frame() >= 600 && s2.Frame() >= 600 && hs.DesyncCount() == 0 &&
+              hs.CurrentDelay() >= 6 && hs.RttMs() >= 100 && secs < 14.0, msg);
     }
 
     printf(g_fail ? "RESULT: FAIL (%d)\n" : "RESULT: PASS\n", g_fail);

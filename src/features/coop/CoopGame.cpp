@@ -35,7 +35,8 @@ static bool g_quitRequested = false;
 uint32_t g_catchupFrames = 0;
 static uint32_t g_totalFramesAtRestart = 0; // frames run in earlier epochs
 static uint32_t g_frameEpoch = 0;            // epoch the running frame started in
-static std::string g_pendingResync;          // host: resync requested, runs at the next quiet loop   // extra frames run in the same loop (guest catching up)
+static std::string g_pendingResync;          // host: resync requested, runs at the next quiet loop
+static bool g_hostGone = false;              // guest: the host left; play on alone   // extra frames run in the same loop (guest catching up)
 
 static const float FIXED_SPEED = 16.0f / 60.0f; // FTL: 16 speed units per second, 60 lockstep frames per second
 
@@ -371,7 +372,12 @@ public:
             if (ShipManager* s = G_->GetShipManager(0))
                 for (size_t i = 0; i < s->vCrewList.size(); ++i)
                     if (s->vCrewList[i] && CrewOwner(s->vCrewList[i]) == slot) SubmitLocal(CoopCommands::AssignCrew((int)i, 0));
-        CoopOverlay::Post(slot == 0 ? "Lost the connection to the host" : "Player " + std::to_string(slot + 1) + " left");
+        CoopOverlay::Post(slot == 0 ? "Lost the connection to the host: you keep playing this run alone" : "Player " + std::to_string(slot + 1) + " left");
+        if (slot == 0 && g_session && !g_session->IsHost())
+        {
+            // The host is gone: stop lockstep and let this copy go on as a normal single-player game.
+            g_hostGone = true;
+        }
     }
 };
 static GameAdapter g_adapter;
@@ -410,6 +416,7 @@ static void InitSession()
     s.buildId = std::string(__DATE__) + " " + __TIME__;
     if (!Env("FTL_COOP_BUILD_ID").empty()) s.buildId = Env("FTL_COOP_BUILD_ID");
     g_transport.reset(new coop::TcpTransport());
+    if (getenv("FTL_COOP_TEST_LATENCY_MS")) g_transport->SetTestLatencyMs(atoi(getenv("FTL_COOP_TEST_LATENCY_MS")));
     // The session installs the transport callbacks, so it must exist before Connect (which says hello).
     g_session.reset(new coop::Session(g_transport.get(), &g_adapter, s, c.host, c.name));
     g_session->SetAllowLateJoin(true);
@@ -582,9 +589,9 @@ static void Quit(const char* why)
 {
     if (g_quitRequested) return;
     g_quitRequested = true;
-    Logf("SUMMARY frames=%u desyncs=%u stalls=%u players=%d catchup=%u resyncs=%u reason=%s", g_session ? g_session->Frame() : 0,
+    Logf("SUMMARY frames=%u desyncs=%u stalls=%u players=%d catchup=%u resyncs=%u rtt=%.0f delay=%u reason=%s", g_session ? g_session->Frame() : 0,
          g_session ? g_session->DesyncCount() : 0, g_session ? g_session->StallFrames() : 0,
-         g_session ? g_session->PlayerCount() : 0, g_catchupFrames, g_resyncs, why);
+         g_session ? g_session->PlayerCount() : 0, g_catchupFrames, g_resyncs, g_session ? g_session->RttMs() : 0.0, g_session ? g_session->CurrentDelay() : 0, why);
     Logf("RNG foreign-thread rand calls: %u [%s] random32: %u", CoopRng::ForeignCalls(), CoopRng::ForeignCallers().c_str(), CoopRng::g_r32Foreign);
     G_->GetCApp()->OnRequestExit();
 }
@@ -609,6 +616,13 @@ int BeforeLoop()
     }
     HostMaybeStart();
     StepStart();
+    if (g_hostGone && g_inLockstep)
+    {
+        g_inLockstep = false;
+        CoopRng::Own(false);
+        Log("host left: lockstep stopped, playing on alone");
+        if (GetConfig().exitAfterFrames) { Quit("host left"); return 1; }
+    }
     if (!g_inLockstep) return 1;
     if (!InGame())
     {
@@ -662,11 +676,11 @@ void RunFrameEnd()
     }
     // Tests: FTL_COOP_EXIT_EPOCH=N counts only frames of epoch N and later (late-join tests).
     static uint32_t exitEpoch = getenv("FTL_COOP_EXIT_EPOCH") ? (uint32_t)atoi(getenv("FTL_COOP_EXIT_EPOCH")) : 0;
-    if (exitEpoch)
-    {
-        if (g_session->Epoch() >= exitEpoch && GetConfig().exitAfterFrames && f >= GetConfig().exitAfterFrames) Quit("exit_after reached");
-    }
-    else if (GetConfig().exitAfterFrames && framesBefore + f >= GetConfig().exitAfterFrames) Quit("exit_after reached");
+    // The host leaves last: it keeps running (and sending bundles) until every guest has reached the end frame too.
+    uint32_t target = 0; bool reached = false;
+    if (exitEpoch) { reached = g_session->Epoch() >= exitEpoch && GetConfig().exitAfterFrames && f >= GetConfig().exitAfterFrames; target = GetConfig().exitAfterFrames; }
+    else { reached = GetConfig().exitAfterFrames && framesBefore + f >= GetConfig().exitAfterFrames; target = GetConfig().exitAfterFrames > framesBefore ? GetConfig().exitAfterFrames - framesBefore : 0; }
+    if (reached && (!g_session->IsHost() || g_session->MinGuestDone() >= target)) Quit("exit_after reached");
 }
 
 bool FramesQueued() { return g_session && g_session->Started(); }

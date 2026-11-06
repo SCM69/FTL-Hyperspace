@@ -39,7 +39,14 @@ public:
     void Close(int peer) override;
     int ListenPort() const { return m_port; }
 
+    // Tests: hold every outgoing message this long before it goes on the wire (one-way latency).
+    void SetTestLatencyMs(int ms) { m_latencyMs = ms; }
+
 private:
+    struct Delayed { double due; int peer; Bytes msg; };
+    std::vector<Delayed> m_delayed;
+    int m_latencyMs = 0;
+    void SendNow(int peer, const Bytes& msg);
     struct Conn { int fd; int id; Bytes in; Bytes out; bool dead; };
     void FlushConn(Conn& c);
     void ReadConn(Conn& c);

@@ -29,6 +29,8 @@ enum MsgType : uint8_t
     MSG_START = 7,   // host -> guest: start lockstep at frame 0 with this start blob (seed, save...)
     MSG_DESYNC = 8,  // host -> guest: hashes differed at frame
     MSG_CHAT = 9,    // either way: text (also used for status lines)
+    MSG_PING = 10,   // host -> guest: f64 host time (ms)
+    MSG_PONG = 11,   // guest -> host: the same f64, sent back at once
 };
 
 static const uint32_t PROTOCOL_VERSION = 2;
@@ -98,6 +100,14 @@ public:
 
     // Diagnostics
     uint32_t StallFrames() const { return m_stalls; }
+    // Host: lowest frame every guest has finished (or Frame() with no guests).
+    uint32_t MinGuestDone() const;
+    // Host: measured round trip (ms, smoothed) and the input delay / window it chose.
+    double RttMs() const { return m_rttMs; }
+    uint32_t CurrentDelay() const { return m_s.delay; }
+    uint32_t CurrentWindow() const { return m_s.window; }
+    // Host: adapt delay and window to the slowest guest's round trip (on by default).
+    void SetAdaptive(bool on) { m_adaptive = on; }
     // Consecutive bundles already here, starting at Frame() (guests use it to catch up).
     uint32_t ReadyAhead() const { uint32_t n = 0; while (m_bundles.count(m_frame + n)) ++n; return n; }
     uint32_t DesyncCount() const { return m_desyncs; }
@@ -132,6 +142,11 @@ private:
     uint32_t m_desyncs;
     bool m_allowLateJoin = false;
     uint32_t m_epoch = 0;          // increases with every Start/Restart; stale messages are dropped
+    bool m_adaptive = true;
+    double m_rttMs = 0;
+    double m_lastPing = 0;
+    std::map<int, double> m_peerRtt;         // host: slot -> smoothed round trip
+    void Adapt();
     void ResetFrames();
 };
 

@@ -3,7 +3,52 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include <ctime>
+#include <cmath>
 namespace coop {
+
+static double ClockMs()
+{
+    timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
+uint32_t Session::MinGuestDone() const
+{
+    uint32_t m = m_frame;
+    for (auto& kv : m_peers)
+    {
+        if (!kv.second.welcomed || kv.second.slot < 0) continue;
+        uint32_t d = kv.second.hasDone ? kv.second.doneFrame + 1 : 0;
+        if (d < m) m = d;
+    }
+    return m;
+}
+
+// Input delay must cover the one-way trip (a guest needs bundle f before it runs frame f); the window must cover the
+// round trip (the host waits for DONE messages). Frames are 1/60 s. Raising or lowering the delay is safe: the host
+// only ever schedules further ahead, and frames already scheduled keep their bundles.
+void Session::Adapt()
+{
+    if (!m_adaptive || m_peerRtt.empty()) return;
+    double worst = 0;
+    for (auto& kv : m_peerRtt) if (kv.second > worst) worst = kv.second;
+    m_rttMs = worst;
+    const double frameMs = 1000.0 / 60.0;
+    uint32_t delay = (uint32_t)std::ceil((worst / 2.0) / frameMs) + 2;
+    if (delay < 3) delay = 3;
+    if (delay > 30) delay = 30;
+    uint32_t window = delay + (uint32_t)std::ceil(worst / frameMs) + 4;
+    if (window > 90) window = 90;
+    if (delay != m_s.delay || window != m_s.window)
+    {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "round trip %.0f ms: input delay %u frames, window %u", worst, delay, window);
+        Log(buf);
+        m_s.delay = delay;
+        m_s.window = window;
+    }
+}
 
 Session::Session(Transport* t, Adapter* a, const Settings& s, bool isHost, const std::string& name)
     : m_t(t), m_adapter(a), m_s(s), m_isHost(isHost), m_name(name), m_slot(isHost ? 0 : -1),
@@ -53,6 +98,7 @@ void Session::OnDisconnect(int peer)
         if (it == m_peers.end()) return;
         int slot = it->second.slot;
         m_peers.erase(it);
+        m_peerRtt.erase(slot);
         if (slot >= 0)
         {
             m_names.erase(slot);
@@ -144,12 +190,24 @@ void Session::HostScheduleUpTo(uint32_t frame)
         Writer w; w.u8(MSG_BUNDLE); w.u32(f); w.u16((uint16_t)b.size());
         for (auto& c : b) { w.u8(c.slot); w.bytes(c.data); }
         for (auto& kv : m_peers) if (kv.second.welcomed) m_t->Send(kv.first, w.b);
+
     }
 }
 
 void Session::Poll()
 {
     m_t->Poll();
+    // Host: measure each guest's round trip twice a second (ping answered at once by the guest's network code).
+    if (m_isHost && !m_peers.empty())
+    {
+        double now = ClockMs();
+        if (now - m_lastPing > 500)
+        {
+            m_lastPing = now;
+            Writer w; w.u8(MSG_PING); w.u64((uint64_t)(now * 1000.0));
+            for (auto& kv : m_peers) if (kv.second.welcomed) m_t->Send(kv.first, w.b);
+        }
+    }
 }
 
 bool Session::BeginFrame()
@@ -280,7 +338,17 @@ void Session::OnMessage(int peer, const Bytes& msg)
             uint32_t f = r.u32(); uint8_t hasHash = r.u8();
             if (epoch != m_epoch) return; // from before a restart
             if (!p.hasDone || f > p.doneFrame) { p.doneFrame = f; p.hasDone = true; }
+
             if (hasHash) { m_hashes[f][p.slot] = r.u64(); HostCompare(f); }
+        }
+        else if (type == MSG_PONG)
+        {
+            double sentMs = (double)r.u64() / 1000.0;
+            double sample = ClockMs() - sentMs;
+            double& rtt = m_peerRtt[p.slot];
+            if (rtt <= 0) rtt = sample;
+            else rtt = rtt * 0.8 + sample * 0.2;
+            Adapt();
         }
         else if (type == MSG_CHAT)
         {
@@ -317,6 +385,12 @@ void Session::OnMessage(int peer, const Bytes& msg)
             uint32_t f = r.u32(); uint16_t n = r.u16();
             std::vector<Command>& b = m_bundles[f];
             for (uint16_t i = 0; i < n && !r.bad; ++i) { Command c; c.slot = r.u8(); c.data = r.bytes(); b.push_back(c); }
+        }
+        else if (type == MSG_PING)
+        {
+            uint64_t t = r.u64();
+            Writer w; w.u8(MSG_PONG); w.u64(t);
+            m_t->Send(0, w.b);
         }
         else if (type == MSG_REJECT)
         {

@@ -1,6 +1,7 @@
 #include "CoopNet.h"
 
 #include <cerrno>
+#include <ctime>
 #include <cstring>
 #include <fcntl.h>
 #include <netdb.h>
@@ -85,7 +86,19 @@ TcpTransport::Conn* TcpTransport::Find(int peer)
     return nullptr;
 }
 
+static double NowMs()
+{
+    timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+
 void TcpTransport::Send(int peer, const Bytes& msg)
+{
+    if (m_latencyMs > 0) { m_delayed.push_back(Delayed{ NowMs() + m_latencyMs, peer, msg }); return; }
+    SendNow(peer, msg);
+}
+
+void TcpTransport::SendNow(int peer, const Bytes& msg)
 {
     Conn* c = Find(peer);
     if (!c) return;
@@ -139,6 +152,13 @@ void TcpTransport::ReadConn(Conn& c)
 
 void TcpTransport::Poll()
 {
+    if (!m_delayed.empty())
+    {
+        double now = NowMs();
+        size_t k = 0;
+        while (k < m_delayed.size() && m_delayed[k].due <= now) { SendNow(m_delayed[k].peer, m_delayed[k].msg); ++k; }
+        if (k) m_delayed.erase(m_delayed.begin(), m_delayed.begin() + k);
+    }
     if (m_listenFd >= 0)
     {
         for (;;)
