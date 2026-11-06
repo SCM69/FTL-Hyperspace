@@ -1,3 +1,6 @@
+#include <unistd.h>
+#include <cstdlib>
+#include <cstdio>
 #include "zhl_internal.h"
 #include "zhl_private.h"
 #include "detours.h"
@@ -43,14 +46,16 @@ void ZHL::Init()
 
 	if(!Definition::Init())
 	{
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal Error", FunctionDefinition::GetLastError(), NULL);
+		if (!getenv("HYPERSPACE_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal Error", FunctionDefinition::GetLastError(), NULL);
+		fprintf(stderr, "ZHL fatal: %s\n", FunctionDefinition::GetLastError()); if (getenv("HYPERSPACE_NO_DIALOGS")) _exit(3);
         fprintf(stderr, "Fatal Error %s:", FunctionDefinition::GetLastError());
         exit(1);
 	}
 
 	if(!FunctionHook_private::Init())
 	{
-		SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal Error", FunctionHook_private::GetLastError(), NULL);
+		if (!getenv("HYPERSPACE_NO_DIALOGS")) SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Fatal Error", FunctionHook_private::GetLastError(), NULL);
+		fprintf(stderr, "ZHL fatal: %s\n", FunctionHook_private::GetLastError()); if (getenv("HYPERSPACE_NO_DIALOGS")) _exit(3);
         fprintf(stderr, "Fatal Error %s:", FunctionHook_private::GetLastError());
         exit(1);
 	}

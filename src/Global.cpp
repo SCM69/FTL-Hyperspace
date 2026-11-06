@@ -69,8 +69,12 @@ void ErrorMessage(const std::string &msg)
 
 void ErrorMessage(const char *msg)
 {
-    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", msg, NULL);
+    // Automated runs (co-op test bots, headless) must not block on a dialog nobody can click.
+    const char* noDialogs = getenv("HYPERSPACE_NO_DIALOGS");
+    if (!(noDialogs && noDialogs[0] == '1'))
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error", msg, NULL);
     fprintf(stderr, "%s", msg);
+    hs_log_file("ErrorMessage: %s\n", msg);
 }
 
 

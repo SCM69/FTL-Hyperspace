@@ -2,6 +2,7 @@
 #include "CoopCommands.h"
 #include "Global.h"
 #include <map>
+#include <cstring>
 
 using coop::Bytes;
 using coop::Reader;
@@ -25,6 +26,16 @@ Bytes Power(int ship, int sys, int delta, bool force) { Writer w; w.u8(C_POWER);
 Bytes WeaponPower(int index, bool on) { Writer w; w.u8(C_WEAPON_POWER); w.u8((uint8_t)index); w.u8(on ? 1 : 0); return w.b; }
 Bytes DronePower(int index, bool on) { Writer w; w.u8(C_DRONE_POWER); w.u8((uint8_t)index); w.u8(on ? 1 : 0); return w.b; }
 Bytes DoorCmd(int ship, int door, bool open) { Writer w; w.u8(C_DOOR); w.u8((uint8_t)ship); w.u16((uint16_t)door); w.u8(open ? 1 : 0); return w.b; }
+static void F32(Writer& w, float f) { uint32_t u; memcpy(&u, &f, 4); w.u32(u); }
+static float F32(Reader& r) { uint32_t u = r.u32(); float f; memcpy(&f, &u, 4); return f; }
+Bytes Fire(int weapon, int target, bool autoFire, const std::vector<Pointf>& pts)
+{
+    Writer w; w.u8(C_FIRE); w.u8((uint8_t)weapon); w.u8((uint8_t)target); w.u8(autoFire ? 1 : 0); w.u8((uint8_t)pts.size());
+    for (const Pointf& p : pts) { F32(w, p.x); F32(w, p.y); }
+    return w.b;
+}
+Bytes WeaponClear(int weapon) { Writer w; w.u8(C_WEAPON_CLEAR); w.u8((uint8_t)weapon); return w.b; }
+Bytes AutoFire(bool on) { Writer w; w.u8(C_AUTOFIRE); w.u8(on ? 1 : 0); return w.b; }
 Bytes AssignCrew(int crew, int slot) { Writer w; w.u8(C_ASSIGN_CREW); w.u16((uint16_t)crew); w.u8((uint8_t)(int8_t)slot); return w.b; }
 
 // ---------------------------------------------------------------- lookups
@@ -182,6 +193,8 @@ bool Allowed(int slot, const Bytes& cmd, CoopGame::Mode mode, std::string* reaso
         return MaySystem(slot, SystemOf(Ship(0), 3 /* weapons */), reason);
     case C_DRONE_POWER:
         return MaySystem(slot, SystemOf(Ship(0), 4 /* drones */), reason);
+    case C_FIRE: case C_WEAPON_CLEAR: case C_AUTOFIRE:
+        return MaySystem(slot, SystemOf(Ship(0), 3 /* weapons */), reason);
     case C_DOOR:
         return true; // doors stay shared in both modes
     default:
@@ -205,6 +218,10 @@ std::string Describe(const Bytes& cmd)
     case C_DOOR: { int s = r.u8(); int d = r.u16(); snprintf(buf, sizeof(buf), "door ship%d %d open %d", s, d, r.u8()); break; }
     case C_ASSIGN_CREW: { int c = r.u16(); snprintf(buf, sizeof(buf), "assign crew%d slot%d", c, (int8_t)r.u8()); break; }
     case C_SET_MODE: snprintf(buf, sizeof(buf), "mode %d", r.u8()); break;
+    case C_FIRE: { int i = r.u8(); int t = r.u8(); int a = r.u8(); int n = r.u8(); float x = n ? F32(r) : 0, y = n ? F32(r) : 0;
+        snprintf(buf, sizeof(buf), "fire weapon%d at ship%d auto%d n%d (%.1f,%.1f)", i, t, a, n, x, y); break; }
+    case C_WEAPON_CLEAR: snprintf(buf, sizeof(buf), "clear weapon%d", r.u8()); break;
+    case C_AUTOFIRE: snprintf(buf, sizeof(buf), "autofire %d", r.u8()); break;
     default: snprintf(buf, sizeof(buf), "unknown"); break;
     }
     return buf;
@@ -221,7 +238,13 @@ void Apply(int slot, const Bytes& cmd)
     case C_CHOICE:
     {
         int idx = r.u8();
-        if (gui && gui->choiceBox.bOpen) gui->choiceBox.KeyDown((SDLKey)(SDLK_1 + idx));
+        // Same effect as ChoiceBox::KeyDown, without depending on the player's dialog-hotkey setting:
+        // pick an available choice; CommandGui::OnLoop then acts on selectedChoice.
+        if (gui && gui->choiceBox.bOpen && idx < (int)gui->choiceBox.choices.size() && gui->choiceBox.choices[idx].type != 1)
+            gui->choiceBox.selectedChoice = idx;
+        CoopGame::Log("choice: open=" + std::to_string((int)(gui && gui->choiceBox.bOpen)) + " n=" +
+                      std::to_string(gui ? (int)gui->choiceBox.choices.size() : -1) + " selected=" +
+                      std::to_string(gui ? gui->choiceBox.selectedChoice : -9));
         break;
     }
     case C_PAUSE:
@@ -271,6 +294,31 @@ void Apply(int slot, const Bytes& cmd)
         Door* d = DoorAt(Ship(ship), idx);
         if (!d) break;
         if (open) d->Open(); else d->Close();
+        break;
+    }
+    case C_FIRE:
+    {
+        int i = r.u8(); int target = r.u8(); bool autoFire = r.u8() != 0; int n = r.u8();
+        std::vector<Pointf> pts;
+        for (int k = 0; k < n; ++k) { float x = F32(r); float y = F32(r); pts.push_back(Pointf(x, y)); }
+        ShipManager* s = Ship(0);
+        if (!s || !s->weaponSystem || i >= (int)s->weaponSystem->weapons.size()) break;
+        ProjectileFactory* w = s->weaponSystem->weapons[i];
+        w->SetAutoFire(autoFire);
+        w->Fire(pts, target);
+        break;
+    }
+    case C_WEAPON_CLEAR:
+    {
+        int i = r.u8();
+        ShipManager* s = Ship(0);
+        if (s && s->weaponSystem && i < (int)s->weaponSystem->weapons.size()) s->weaponSystem->weapons[i]->ClearAiming();
+        break;
+    }
+    case C_AUTOFIRE:
+    {
+        bool on = r.u8() != 0;
+        if (gui) { CoopGame::Log("autofire apply"); gui->combatControl.weapControl.SetAutofiring(on, false); }
         break;
     }
     case C_ASSIGN_CREW:
@@ -325,15 +373,15 @@ HOOK_METHOD_PRIORITY(ChoiceBox, MouseClick, 9000, (int mX, int mY) -> void)
     super(mX, mY);
 }
 
-HOOK_METHOD_PRIORITY(ChoiceBox, KeyDown, 9000, (SDLKey key) -> void)
+HOOK_METHOD_PRIORITY(ChoiceBox, KeyDown, 9000, (SDLKey key) -> bool)
 {
     LOG_HOOK("HOOK_METHOD_PRIORITY -> ChoiceBox::KeyDown -> Begin (CoopCommands.cpp)\n")
     if (ShouldTakeOver())
     {
-        if (key >= SDLK_1 && key <= SDLK_9) CoopGame::SubmitLocal(Choice(key - SDLK_1));
-        return;
+        if (key >= SDLK_1 && key <= SDLK_9) { CoopGame::SubmitLocal(Choice(key - SDLK_1)); return true; }
+        return false;
     }
-    super(key);
+    return super(key);
 }
 
 HOOK_METHOD_PRIORITY(ShipManager, CommandCrewMoveRoom, 9000, (CrewMember* crew, int roomId) -> bool)
@@ -433,4 +481,45 @@ HOOK_METHOD_PRIORITY(CrewControl, LButton, 9000, (int mX, int mY, int wX, int wY
         }
     }
     super(mX, mY, wX, wY, shiftHeld);
+}
+
+static int WeaponIndex(ShipManager* s, ProjectileFactory* w)
+{
+    if (!s || !s->weaponSystem || !w) return -1;
+    auto& v = s->weaponSystem->weapons;
+    for (size_t i = 0; i < v.size(); ++i) if (v[i] == w) return (int)i;
+    return -1;
+}
+
+HOOK_METHOD_PRIORITY(WeaponControl, Fire, 9000, (std::vector<Pointf>& points, int target, bool autoFire) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> WeaponControl::Fire -> Begin (CoopCommands.cpp)\n")
+    if (ShouldTakeOver())
+    {
+        int idx = WeaponIndex(this->shipManager, this->armedWeapon);
+        if (idx >= 0) CoopGame::SubmitLocal(CoopCommands::Fire(idx, target, autoFire, points));
+        // Local UI only: drop the armed weapon as the original does after firing.
+        this->armedWeapon = nullptr;
+        this->armedSlot = -1;
+        return;
+    }
+    super(points, target, autoFire);
+}
+
+HOOK_METHOD_PRIORITY(ProjectileFactory, ClearAiming, 9000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> ProjectileFactory::ClearAiming -> Begin (CoopCommands.cpp)\n")
+    if (ShouldTakeOver())
+    {
+        int idx = WeaponIndex(G_->GetShipManager(0), this);
+        if (idx >= 0) { CoopGame::SubmitLocal(CoopCommands::WeaponClear(idx)); return; }
+    }
+    super();
+}
+
+HOOK_METHOD_PRIORITY(WeaponControl, SetAutofiring, 9000, (bool on, bool simple) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> WeaponControl::SetAutofiring -> Begin (CoopCommands.cpp)\n")
+    if (ShouldTakeOver()) { CoopGame::SubmitLocal(CoopCommands::AutoFire(on)); return; }
+    super(on, simple);
 }

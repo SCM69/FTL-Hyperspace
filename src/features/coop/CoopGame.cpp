@@ -8,6 +8,7 @@
 #include "overrides/FileHelper.h"
 
 #include <cstdarg>
+#include <dlfcn.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,6 +27,7 @@ static std::unique_ptr<coop::Session> g_session;
 static bool g_applying = false;
 static bool g_inLockstep = false;
 static bool g_quitRequested = false;
+uint32_t g_catchupFrames = 0;   // extra frames run in the same loop (guest catching up)
 
 static const float FIXED_SPEED = 16.0f / 60.0f; // FTL: 16 speed units per second, 60 lockstep frames per second
 
@@ -141,7 +143,7 @@ static void HashShip(coop::Hasher& h, ShipManager* s, bool detailCrew)
         h.val(sys->healthState.first); h.val(sys->fDamage); h.val(sys->iLockCount); h.val(sys->iBatteryPower);
     }
     if (s->weaponSystem)
-        for (ProjectileFactory* w : s->weaponSystem->weapons) { if (w) { h.val(w->cooldown.first); h.val(w->powered); } }
+        for (ProjectileFactory* w : s->weaponSystem->weapons) { if (w) { h.val(w->cooldown.first); h.val(w->powered); h.val(w->autoFiring); h.val(w->targetId); h.val((uint32_t)w->targets.size()); } }
     if (detailCrew)
         for (CrewMember* c : s->vCrewList) { if (c) { h.val(c->x); h.val(c->y); h.val(c->health.first); h.val(c->iRoomId); } }
     for (Room* r : s->ship.vRoomList) { (void)r; }
@@ -203,9 +205,10 @@ public:
     uint64_t Hash() override
     {
         HashParts p = ComputeHash();
-        Logf("HASH all=%016llx rng=%016llx time=%016llx player=%016llx crew=%016llx enemy=%016llx ui=%016llx",
+        Logf("HASH all=%016llx rng=%016llx time=%016llx player=%016llx crew=%016llx enemy=%016llx ui=%016llx nrand=%u nrandall=%u nr32=%u",
              (unsigned long long)p.all, (unsigned long long)p.rng, (unsigned long long)p.time, (unsigned long long)p.player,
-             (unsigned long long)p.crew, (unsigned long long)p.enemy, (unsigned long long)p.ui);
+             (unsigned long long)p.crew, (unsigned long long)p.enemy, (unsigned long long)p.ui, CoopRng::g_randCalls, CoopRng::g_randCallsAll, CoopRng::g_r32Calls);
+        if (CoopRng::Tracing()) Log("RNGTRACE " + CoopRng::TraceDump());
         return p.all;
     }
     void OnLog(const std::string& line) override { Log("net: " + line); }
@@ -246,6 +249,10 @@ static void InitSession()
         Log("ERROR: random32 state not found; this FTL build is not supported. Co-op is off.");
         g_cfg.enabled = false;
         return;
+    }
+    {
+        void* global = dlsym(RTLD_DEFAULT, "rand");
+        Logf("rand interposition: global lookup %s our rand (%p vs %p)", global == (void*)&rand ? "==" : "!=", global, (void*)&rand);
     }
     coop::Settings s;
     s.delay = c.delay; s.window = c.window; s.hashEvery = c.hashEvery; s.maxPlayers = 8;
@@ -326,9 +333,10 @@ static void Quit(const char* why)
 {
     if (g_quitRequested) return;
     g_quitRequested = true;
-    Logf("SUMMARY frames=%u desyncs=%u stalls=%u players=%d reason=%s", g_session ? g_session->Frame() : 0,
+    Logf("SUMMARY frames=%u desyncs=%u stalls=%u players=%d catchup=%u reason=%s", g_session ? g_session->Frame() : 0,
          g_session ? g_session->DesyncCount() : 0, g_session ? g_session->StallFrames() : 0,
-         g_session ? g_session->PlayerCount() : 0, why);
+         g_session ? g_session->PlayerCount() : 0, g_catchupFrames, why);
+    Logf("RNG foreign-thread rand calls: %u [%s] random32: %u", CoopRng::ForeignCalls(), CoopRng::ForeignCallers().c_str(), CoopRng::g_r32Foreign);
     G_->GetCApp()->OnRequestExit();
 }
 
@@ -336,9 +344,17 @@ static void Quit(const char* why)
 int BeforeLoop()
 {
     static bool inited = false;
-    if (!inited) { inited = true; InitSession(); }
+    if (!inited) { inited = true; CoopRng::MarkMainThread(); InitSession(); }
     if (!Active() || !g_session) return 1;
     g_session->Poll();
+    static int loops = 0;
+    if (!g_session->Started() && (++loops % 120) == 1)
+    {
+        CApp* app = G_->GetCApp();
+        Logf("status: loop=%d menu.bOpen=%d title=%d builder=%d world=%p started=%d players=%d", loops, (int)app->menu.bOpen,
+             (int)app->menu.IsTitle(), (int)app->menu.shipBuilder.bOpen, (void*)app->world,
+             app->world ? (int)app->world->bStartedGame : -1, g_session->PlayerCount());
+    }
     HostMaybeStart();
     StepStart();
     if (!g_inLockstep) return 1;
@@ -381,10 +397,17 @@ HOOK_METHOD_PRIORITY(CApp, OnLoop, -1000, () -> void)
     LOG_HOOK("HOOK_METHOD_PRIORITY -> CApp::OnLoop -> Begin (CoopGame.cpp)\n")
     int n = BeforeLoop();
     if (n >= 0) { super(); return; }
-    // Lockstep: run the next frame when its bundle is here; run up to 3 extra to catch up.
+    // Test switch: a guest skips K loops out of every 97 (a hitch), so it falls behind and must catch up.
+    static int hitch = getenv("FTL_COOP_TEST_HITCH") ? atoi(getenv("FTL_COOP_TEST_HITCH")) : 0;
+    static int hitchLoop = 0;
+    if (hitch > 0 && !CoopGame::GetSession()->IsHost() && (++hitchLoop % 97) < hitch) return;
+    // Lockstep: the host is the clock and runs one frame per loop. A guest runs the next frame when its bundle
+    // is here, and up to 3 extra frames when it has fallen behind (more bundles waiting than the input delay).
     for (int i = 0; i < 4; ++i)
     {
+        if (i > 0 && (CoopGame::GetSession()->IsHost() || CoopGame::GetSession()->ReadyAhead() <= CoopGame::GetConfig().delay + 1)) break;
         if (!RunFrameBegin()) break;
+        if (i > 0) ++CoopGame::g_catchupFrames;
         super();
         RunFrameEnd();
         if (!CoopGame::InLockstep()) break;
@@ -438,4 +461,30 @@ HOOK_METHOD(CApp, OnKeyDown, (SDLKey key) -> void)
     LOG_HOOK("HOOK_METHOD -> CApp::OnKeyDown -> Begin (CoopGame.cpp)\n")
     if (CoopGame::Active() && key == SDLK_F9) { CoopGame::RequestManualStart(); return; }
     super(key);
+}
+
+// RNG trace for random32 (Hyperspace also hooks it; this only counts callers).
+HOOK_GLOBAL_PRIORITY(random32, 9000, () -> unsigned int)
+{
+    LOG_HOOK("HOOK_GLOBAL_PRIORITY -> random32 -> Begin (CoopGame.cpp)\n")
+    if (CoopRng::Owned())
+    {
+        ++CoopRng::g_r32Calls;
+        if (!CoopRng::IsMainThread()) ++CoopRng::g_r32Foreign;
+    }
+    if (CoopRng::Tracing()) CoopRng::TraceCall(1, __builtin_return_address(0));
+    return super();
+}
+
+// Animation::Update draws random32 for cosmetic choices (random flicker frame, random frame sound). It is called from
+// both simulation and UI code, and how often depends on rendering, so a copy that catches up (several frames
+// without a render) drew a different number of values (seen with FTL_COOP_TEST_HITCH, 2026-11-06).
+// Keep these draws out of the shared stream.
+HOOK_METHOD_PRIORITY(Animation, Update, 9000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> Animation::Update -> Begin (CoopGame.cpp)\n")
+    if (!CoopGame::InLockstep()) { super(); return; }
+    uint64_t s = CoopRng::GetSil();
+    super();
+    CoopRng::SetSil(s);
 }

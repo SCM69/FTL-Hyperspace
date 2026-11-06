@@ -1,5 +1,7 @@
 #pragma once
 #include "CoopGame.h"
+#include <vector>
+struct Pointf;
 
 namespace CoopCommands {
 
@@ -14,6 +16,9 @@ enum Type : uint8_t
     C_DOOR = 7,          // u8 ship id, u16 door index (inner doors, then airlocks), u8 open
     C_ASSIGN_CREW = 8,   // u16 crew index, i8 slot (-1 = nobody). Captain only.
     C_SET_MODE = 9,      // u8 mode. Captain only.
+    C_FIRE = 10,         // u8 weapon index, u8 target ship id, u8 autofire, u8 n, n x (f32 x, f32 y)
+    C_WEAPON_CLEAR = 11, // u8 weapon index
+    C_AUTOFIRE = 12,     // u8 on
 };
 
 // Is an input event (click, key) being handled right now? Only then are actions taken over.
@@ -34,6 +39,9 @@ coop::Bytes WeaponPower(int index, bool on);
 coop::Bytes DronePower(int index, bool on);
 coop::Bytes DoorCmd(int shipId, int doorIndex, bool open);
 coop::Bytes AssignCrew(int crewIndex, int slot);
+coop::Bytes Fire(int weaponIndex, int targetShip, bool autoFire, const std::vector<Pointf>& points);
+coop::Bytes WeaponClear(int weaponIndex);
+coop::Bytes AutoFire(bool on);
 
 } // namespace CoopCommands
 

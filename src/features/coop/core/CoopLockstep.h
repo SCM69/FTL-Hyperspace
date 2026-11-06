@@ -93,6 +93,8 @@ public:
 
     // Diagnostics
     uint32_t StallFrames() const { return m_stalls; }
+    // Consecutive bundles already here, starting at Frame() (guests use it to catch up).
+    uint32_t ReadyAhead() const { uint32_t n = 0; while (m_bundles.count(m_frame + n)) ++n; return n; }
     uint32_t DesyncCount() const { return m_desyncs; }
     void SendChat(const std::string& text);
 
