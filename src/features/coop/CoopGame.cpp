@@ -8,6 +8,9 @@
 #include "overrides/FileHelper.h"
 
 #include <cstdarg>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <cstddef>
 #include <dlfcn.h>
 #include <cstdio>
 #include <cstdlib>
@@ -163,10 +166,53 @@ static HashParts ComputeHash()
     if (ShipManager* e = G_->GetShipManager(1)) for (CrewMember* c : e->vCrewList) { if (c) { hc.val(c->x); hc.val(c->y); hc.val(c->health.first); } }
     p.crew = hc.h;
     coop::Hasher he; HashShip(he, G_->GetShipManager(1), false); p.enemy = he.h;
-    coop::Hasher hu; CommandGui* gui = Gui(); if (gui) { hu.val(gui->bPaused); hu.val(gui->choiceBox.bOpen); } p.ui = hu.h;
+    coop::Hasher hu; CommandGui* gui = Gui(); if (gui) { hu.val(gui->bPaused); hu.val(gui->choiceBox.bOpen); }
+    {
+        StarMap& map = G_->GetWorld()->starMap;
+        int cur = -1;
+        for (size_t i = 0; i < map.locations.size(); ++i) if (map.locations[i] == map.currentLoc) cur = (int)i;
+        hu.val(cur); hu.val(map.worldLevel); hu.val(map.readyToTravel);
+    }
+    p.ui = hu.h;
     coop::Hasher all; all.val(p.rng); all.val(p.time); all.val(p.player); all.val(p.crew); all.val(p.enemy); all.val(p.ui);
     p.all = all.h;
     return p;
+}
+
+// ---------------------------------------------------------------- shared pause
+
+// FTL pauses the simulation while any focus window is open (menu_pause, recomputed in CommandGui::OnLoop from the
+// window list; IsPaused() = bPaused || menu_pause). In co-op a player's own windows (store, ship screen, map, Esc
+// menu) must not pause only their copy. The three writes in CommandGui::OnLoop are patched out and menu_pause is
+// set every frame from shared state only: an event dialog or the game-over screen is open.
+static bool PatchBytes(uintptr_t addr, const unsigned char* expect, const unsigned char* repl, size_t n)
+{
+    if (memcmp((void*)addr, expect, n) != 0) return false;
+    long page = sysconf(_SC_PAGESIZE);
+    uintptr_t start = addr & ~(uintptr_t)(page - 1);
+    size_t len = (addr + n) - start;
+    if (mprotect((void*)start, len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) return false;
+    memcpy((void*)addr, repl, n);
+    mprotect((void*)start, len, PROT_READ | PROT_EXEC);
+    return true;
+}
+
+static bool PatchMenuPause()
+{
+    static const unsigned char set0[7] = { 0xc6, 0x83, 0x92, 0x32, 0x00, 0x00, 0x00 };
+    static const unsigned char set1[7] = { 0xc6, 0x83, 0x92, 0x32, 0x00, 0x00, 0x01 };
+    static const unsigned char nop7[7] = { 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00 };
+    bool ok = PatchBytes(0x4fec6b, set0, nop7, 7);
+    ok = PatchBytes(0x4fecc5, set1, nop7, 7) && ok;
+    ok = PatchBytes(0x4fed03, set1, nop7, 7) && ok;
+    return ok;
+}
+
+static void SetSharedMenuPause()
+{
+    CommandGui* gui = Gui();
+    if (!gui) return;
+    gui->menu_pause = gui->choiceBox.bOpen || gui->gameOverScreen.bOpen;
 }
 
 // ---------------------------------------------------------------- start of a run
@@ -244,6 +290,12 @@ static void InitSession()
 {
     const Config& c = GetConfig();
     if (!c.userDir.empty()) FileHelperExtension::setUserFolder(c.userDir);
+    if (!PatchMenuPause())
+    {
+        Log("ERROR: CommandGui::OnLoop code differs from FTL 1.6.13 Linux amd64; co-op is off.");
+        g_cfg.enabled = false;
+        return;
+    }
     if (!CoopRng::SilAvailable())
     {
         Log("ERROR: random32 state not found; this FTL build is not supported. Co-op is off.");
@@ -254,6 +306,8 @@ static void InitSession()
         void* global = dlsym(RTLD_DEFAULT, "rand");
         Logf("rand interposition: global lookup %s our rand (%p vs %p)", global == (void*)&rand ? "==" : "!=", global, (void*)&rand);
     }
+    Logf("layout check: ShipManager jump_timer=%zu (DWARF 1544) fuel_count=%zu (1552) bJumping=%zu (1652) lastJumpReady=%zu (2257)",
+         offsetof(ShipManager, jump_timer), offsetof(ShipManager, fuel_count), offsetof(ShipManager, bJumping), offsetof(ShipManager, lastJumpReady));
     coop::Settings s;
     s.delay = c.delay; s.window = c.window; s.hashEvery = c.hashEvery; s.maxPlayers = 8;
     s.buildId = std::string(__DATE__) + " " + __TIME__;
@@ -372,6 +426,7 @@ int BeforeLoop()
 bool RunFrameBegin()
 {
     if (!g_session->BeginFrame()) return false;
+    SetSharedMenuPause();
     CoopBot::BeforeFrame(g_session->Frame());
     return true;
 }

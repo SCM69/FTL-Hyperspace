@@ -19,6 +19,7 @@ enum Type : uint8_t
     C_FIRE = 10,         // u8 weapon index, u8 target ship id, u8 autofire, u8 n, n x (f32 x, f32 y)
     C_WEAPON_CLEAR = 11, // u8 weapon index
     C_AUTOFIRE = 12,     // u8 on
+    C_JUMP = 13,         // u16 location index in StarMap::locations. Captain only.
 };
 
 // Is an input event (click, key) being handled right now? Only then are actions taken over.
@@ -42,6 +43,7 @@ coop::Bytes AssignCrew(int crewIndex, int slot);
 coop::Bytes Fire(int weaponIndex, int targetShip, bool autoFire, const std::vector<Pointf>& points);
 coop::Bytes WeaponClear(int weaponIndex);
 coop::Bytes AutoFire(bool on);
+coop::Bytes Jump(int locationIndex);
 
 } // namespace CoopCommands
 

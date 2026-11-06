@@ -35,6 +35,7 @@ Bytes Fire(int weapon, int target, bool autoFire, const std::vector<Pointf>& pts
     return w.b;
 }
 Bytes WeaponClear(int weapon) { Writer w; w.u8(C_WEAPON_CLEAR); w.u8((uint8_t)weapon); return w.b; }
+Bytes Jump(int loc) { Writer w; w.u8(C_JUMP); w.u16((uint16_t)loc); return w.b; }
 Bytes AutoFire(bool on) { Writer w; w.u8(C_AUTOFIRE); w.u8(on ? 1 : 0); return w.b; }
 Bytes AssignCrew(int crew, int slot) { Writer w; w.u8(C_ASSIGN_CREW); w.u16((uint16_t)crew); w.u8((uint8_t)(int8_t)slot); return w.b; }
 
@@ -162,7 +163,7 @@ bool Allowed(int slot, const Bytes& cmd, CoopGame::Mode mode, std::string* reaso
     uint8_t t = r.u8();
     switch (t)
     {
-    case C_CHOICE: case C_ASSIGN_CREW: case C_SET_MODE:
+    case C_CHOICE: case C_ASSIGN_CREW: case C_SET_MODE: case C_JUMP:
         if (slot != 0) { *reason = "only the captain (host) can do that"; return false; }
         return true;
     case C_PAUSE:
@@ -222,6 +223,7 @@ std::string Describe(const Bytes& cmd)
         snprintf(buf, sizeof(buf), "fire weapon%d at ship%d auto%d n%d (%.1f,%.1f)", i, t, a, n, x, y); break; }
     case C_WEAPON_CLEAR: snprintf(buf, sizeof(buf), "clear weapon%d", r.u8()); break;
     case C_AUTOFIRE: snprintf(buf, sizeof(buf), "autofire %d", r.u8()); break;
+    case C_JUMP: snprintf(buf, sizeof(buf), "jump to location %d", r.u16()); break;
     default: snprintf(buf, sizeof(buf), "unknown"); break;
     }
     return buf;
@@ -319,6 +321,24 @@ void Apply(int slot, const Bytes& cmd)
     {
         bool on = r.u8() != 0;
         if (gui) { CoopGame::Log("autofire apply"); gui->combatControl.weapControl.SetAutofiring(on, false); }
+        break;
+    }
+    case C_JUMP:
+    {
+        // What StarMap::MouseClick does for a reachable beacon: StarMap::GetNewLocation then starts the jump.
+        int idx = r.u16();
+        StarMap& map = G_->GetWorld()->starMap;
+        if (idx >= (int)map.locations.size() || !map.currentLoc) break;
+        Location* loc = map.locations[idx];
+        bool connected = false;
+        for (Location* c : map.currentLoc->connectedLocations) if (c == loc) connected = true;
+        if (!connected) { CoopGame::Log("jump ignored: not connected"); break; }
+        // A player always closes the store and ship screens before opening the map; jumping with the store open
+        // crashed both copies (2026-11-06). Close them on every copy first.
+        if (gui && gui->storeScreens.bOpen) gui->storeScreens.Close();
+        if (gui && gui->shipScreens.bOpen) gui->shipScreens.Close();
+        map.potentialLoc = loc;
+        map.readyToTravel = true;
         break;
     }
     case C_ASSIGN_CREW:
@@ -522,4 +542,19 @@ HOOK_METHOD_PRIORITY(WeaponControl, SetAutofiring, 9000, (bool on, bool simple) 
     LOG_HOOK("HOOK_METHOD_PRIORITY -> WeaponControl::SetAutofiring -> Begin (CoopCommands.cpp)\n")
     if (ShouldTakeOver()) { CoopGame::SubmitLocal(CoopCommands::AutoFire(on)); return; }
     super(on, simple);
+}
+
+// Star map: a click on a beacon arms the jump (readyToTravel). Take that over and send it as a command instead.
+HOOK_METHOD_PRIORITY(StarMap, MouseClick, 9000, (int mX, int mY) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> StarMap::MouseClick -> Begin (CoopCommands.cpp)\n")
+    bool takeOver = ShouldTakeOver();
+    bool wasReady = this->readyToTravel;
+    super(mX, mY);
+    if (takeOver && !wasReady && this->readyToTravel && this->potentialLoc)
+    {
+        this->readyToTravel = false;
+        for (size_t i = 0; i < this->locations.size(); ++i)
+            if (this->locations[i] == this->potentialLoc) CoopGame::SubmitLocal(CoopCommands::Jump((int)i));
+    }
 }
