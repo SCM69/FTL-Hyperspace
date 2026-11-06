@@ -108,6 +108,9 @@ target_link_libraries(
     Threads::Threads
     SDL3::SDL3
 )
+if(WIN32)
+    target_link_libraries(Hyperspace PRIVATE ws2_32) # co-op TCP transport
+endif()
 
 # Sources belong in src/
 file(GLOB ROOT_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/*.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/*.h")

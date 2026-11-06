@@ -3,10 +3,15 @@
 This branch is a **modified version of [FTL-Hyperspace](https://github.com/FTL-Hyperspace/FTL-Hyperspace)**
 (GPL-3.0-or-later, see LICENSE and COPYRIGHT.md) that adds online co-op for up to 8 players to
 FTL: Faster Than Light. It is not an official Hyperspace release. Changes from upstream:
-`src/features/coop/`, `tests/coop/`, `libzhlgen/test/functions/ELF_amd64/1.6.13/ParticleEmitter.zhl`,
-and small edits in `src/Global.cpp` and `src/zhl/zhl.cpp` (`HYPERSPACE_NO_DIALOGS`).
+`src/features/coop/`, `tests/coop/`, `Release Files/Linux/coop-install.sh`, `Release Files/Windows/coop/`,
+`ParticleEmitter.zhl` and `BatterySystem.zhl` in `libzhlgen/test/functions/ELF_amd64/1.6.13/` and `win32/1.6.9/`,
+a ws2_32 link line in `CMakeLists.txt`, and small edits in `src/Global.cpp`, `src/zhl/zhl.cpp` (`HYPERSPACE_NO_DIALOGS`)
+and `src/game/Utilities/Resources.cpp`.
 
-Status: **work in progress, not released.** Tested only on Linux, Steam FTL 1.6.13.
+Status: **work in progress, not released.** Linux (Steam FTL 1.6.13) is tested; the Windows build (FTL 1.6.9)
+compiles and is checked against the 1.6.9 game file, but has not been run yet. Windows and Linux players cannot
+play together (different programs, so the simulations would differ); a Linux player can join Windows players by
+running the Windows game through Proton.
 
 ## How it works
 
@@ -24,6 +29,22 @@ their own crew members and the systems they staff). Jumps and event choices belo
 Like Hyperspace (see wiki/Building-on-Linux.md):
 
     buildscripts/docker-run-in-devcontainer.sh buildscripts/linux-1.6.13/build-releaseonly.sh
+
+Build for Windows:
+
+    buildscripts/docker-run-in-devcontainer.sh buildscripts/windows/build-releaseonly.sh
+    "Release Files/Windows/coop/package.sh" build-windows-release/Hyperspace.dll FTL-Coop-Windows.zip
+
+## Install (Windows, FTL 1.6.9)
+
+Roll FTL back to 1.6.9 with [FTL-Version-Rollback](https://github.com/FTL-Hyperspace/FTL-Version-Rollback), copy
+`Hyperspace.dll`, `xinput1_4.dll` and `coop-install.bat` from the zip next to `FTLGame.exe`, run `coop-install.bat`
+(checks the 1.6.9 SHA-1, writes `coop.cfg`), edit `coop.cfg`. `README-COOP.txt` in the zip is the player guide.
+Under Proton the proxy DLL usually also needs the launch option `WINEDLLOVERRIDES="xinput1_4=n,b" %command%` (not yet tried).
+
+Windows specifics: `rand`/`srand` are taken over by pointing FTLGame.exe's msvcrt imports at the mod (15-bit
+results, as msvcrt's RAND_MAX); random32's state and the three `menu_pause` writes in `CommandGui::OnLoop` are found
+by scanning code, and only patched when the expected instructions are there.
 
 ## Install (Linux, Steam FTL 1.6.13)
 

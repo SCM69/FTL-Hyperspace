@@ -1,5 +1,5 @@
 // FTL co-op: game side of the lockstep session.
-// Turned on by FTL_COOP=host|guest|solo (environment) or a coop.cfg next to FTL.amd64. Without it nothing changes.
+// Turned on by FTL_COOP=host|guest|solo (environment) or a coop.cfg next to the game (FTL.amd64 / FTLGame.exe). Without it nothing changes.
 #include "CoopGame.h"
 #include "CoopCommands.h"
 #include "CoopRng.h"
@@ -8,10 +8,15 @@
 #include "overrides/FileHelper.h"
 
 #include <cstdarg>
+#include <cstddef>
+#ifdef _WIN32
+#include <windows.h>
+#include "../../zhl/zhl_internal.h"
+#else
 #include <sys/mman.h>
 #include <unistd.h>
-#include <cstddef>
 #include <dlfcn.h>
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -52,8 +57,12 @@ static void LoadConfigFile(std::map<std::string, std::string>& kv)
 {
     std::ifstream f("coop.cfg");
     std::string line;
+    bool first = true;
     while (std::getline(f, line))
     {
+        if (first && line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3); // UTF-8 BOM (Windows Notepad)
+        first = false;
+        while (!line.empty() && (line[0] == ' ' || line[0] == '\t')) line.erase(0, 1);
         if (line.empty() || line[0] == '#') continue;
         size_t eq = line.find('=');
         if (eq == std::string::npos) continue;
@@ -204,6 +213,14 @@ static HashParts ComputeHash()
 static bool PatchBytes(uintptr_t addr, const unsigned char* expect, const unsigned char* repl, size_t n)
 {
     if (memcmp((void*)addr, expect, n) != 0) return false;
+#ifdef _WIN32
+    DWORD old;
+    if (!VirtualProtect((void*)addr, n, PAGE_EXECUTE_READWRITE, &old)) return false;
+    memcpy((void*)addr, repl, n);
+    VirtualProtect((void*)addr, n, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), (void*)addr, n);
+    return true;
+#else
     long page = sysconf(_SC_PAGESIZE);
     uintptr_t start = addr & ~(uintptr_t)(page - 1);
     size_t len = (addr + n) - start;
@@ -211,8 +228,36 @@ static bool PatchBytes(uintptr_t addr, const unsigned char* expect, const unsign
     memcpy((void*)addr, repl, n);
     mprotect((void*)start, len, PROT_READ | PROT_EXEC);
     return true;
+#endif
 }
 
+#ifdef _WIN32
+// Windows 1.6.9: the same three writes (mov byte [ebx+0x2e72], 0/1/1) in CommandGui::OnLoop (0x5220b0 in the
+// 1.6.9 exe: at +0x335, +0x381, +0x3b5). Found by scanning from the address ZHL resolved for the function, and only
+// patched when exactly that set is there.
+static_assert(offsetof(CommandGui, menu_pause) == 0x2e72, "CommandGui layout differs from Windows FTL 1.6.9");
+static bool PatchMenuPause()
+{
+    static const unsigned char set0[7] = { 0xc6, 0x83, 0x72, 0x2e, 0x00, 0x00, 0x00 };
+    static const unsigned char set1[7] = { 0xc6, 0x83, 0x72, 0x2e, 0x00, 0x00, 0x01 };
+    static const unsigned char nop7[7] = { 0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00 };
+    ZHL::FunctionDefinition* def = (ZHL::FunctionDefinition*)ZHL::Definition::Find("CommandGui::OnLoop");
+    unsigned char* f = def ? (unsigned char*)def->GetAddress() : nullptr;
+    if (!f) { Log("CommandGui::OnLoop address unknown"); return false; }
+    std::vector<unsigned char*> hits0, hits1;
+    for (size_t i = 0; i < 0x800; ++i)
+    {
+        if (!memcmp(f + i, set0, 7)) hits0.push_back(f + i);
+        else if (!memcmp(f + i, set1, 7)) hits1.push_back(f + i);
+    }
+    Logf("menu_pause writes in CommandGui::OnLoop (%p): %zu x0, %zu x1", (void*)f, hits0.size(), hits1.size());
+    if (hits0.size() != 1 || hits1.size() != 2) return false;
+    bool ok = PatchBytes((uintptr_t)hits0[0], set0, nop7, 7);
+    ok = PatchBytes((uintptr_t)hits1[0], set1, nop7, 7) && ok;
+    ok = PatchBytes((uintptr_t)hits1[1], set1, nop7, 7) && ok;
+    return ok;
+}
+#else
 static bool PatchMenuPause()
 {
     static const unsigned char set0[7] = { 0xc6, 0x83, 0x92, 0x32, 0x00, 0x00, 0x00 };
@@ -223,6 +268,7 @@ static bool PatchMenuPause()
     ok = PatchBytes(0x4fed03, set1, nop7, 7) && ok;
     return ok;
 }
+#endif
 
 static void SetSharedMenuPause()
 {
@@ -395,7 +441,7 @@ static void InitSession()
     if (!c.userDir.empty()) FileHelperExtension::setUserFolder(c.userDir);
     if (!PatchMenuPause())
     {
-        Log("ERROR: CommandGui::OnLoop code differs from FTL 1.6.13 Linux amd64; co-op is off.");
+        Log("ERROR: CommandGui::OnLoop code differs from the supported FTL build (Linux 1.6.13 / Windows 1.6.9); co-op is off.");
         g_cfg.enabled = false;
         return;
     }
@@ -405,16 +451,31 @@ static void InitSession()
         g_cfg.enabled = false;
         return;
     }
+    if (!CoopRng::InstallHooks())
+    {
+        Log("ERROR: could not take over rand/srand; co-op is off.");
+        g_cfg.enabled = false;
+        return;
+    }
+#ifndef _WIN32
     {
         void* global = dlsym(RTLD_DEFAULT, "rand");
         Logf("rand interposition: global lookup %s our rand (%p vs %p)", global == (void*)&rand ? "==" : "!=", global, (void*)&rand);
     }
+#endif
     Logf("layout check: ShipManager jump_timer=%zu (DWARF 1544) fuel_count=%zu (1552) bJumping=%zu (1652) lastJumpReady=%zu (2257)",
          offsetof(ShipManager, jump_timer), offsetof(ShipManager, fuel_count), offsetof(ShipManager, bJumping), offsetof(ShipManager, lastJumpReady));
     coop::Settings s;
     s.delay = c.delay; s.window = c.window; s.hashEvery = c.hashEvery; s.maxPlayers = 8;
-    s.buildId = std::string(__DATE__) + " " + __TIME__;
-    if (!Env("FTL_COOP_BUILD_ID").empty()) s.buildId = Env("FTL_COOP_BUILD_ID");
+    // Windows and Linux FTL are different programs (different code, floating point and rand), so they cannot share a
+    // lockstep game: the platform is part of the build id, and the host refuses a player whose id differs.
+#ifdef _WIN32
+    const std::string platform = "Windows FTL 1.6.9";
+#else
+    const std::string platform = "Linux FTL 1.6.13";
+#endif
+    s.buildId = platform + ", mod built " + __DATE__ + " " + __TIME__;
+    if (!Env("FTL_COOP_BUILD_ID").empty()) s.buildId = platform + ", " + Env("FTL_COOP_BUILD_ID");
     g_transport.reset(new coop::TcpTransport());
     if (getenv("FTL_COOP_TEST_LATENCY_MS")) g_transport->SetTestLatencyMs(atoi(getenv("FTL_COOP_TEST_LATENCY_MS")));
     // The session installs the transport callbacks, so it must exist before Connect (which says hello).

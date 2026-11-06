@@ -19,4 +19,7 @@ uint32_t ForeignCalls();    // rand() calls from other threads while owned
 std::string ForeignCallers();
 extern uint32_t g_randCalls, g_randCallsAll, g_r32Calls, g_r32Foreign;
 bool IsMainThread();
+// Windows: redirect FTLGame.exe's rand/srand imports (false if they were not found). Linux: always true.
+bool InstallHooks();
+extern int g_importsPatched;
 }
