@@ -488,3 +488,14 @@ HOOK_METHOD_PRIORITY(Animation, Update, 9000, () -> void)
     super();
     CoopRng::SetSil(s);
 }
+
+// Particle effects (fire extinguishers, crew effects) draw random32 in ParticleEmitter::Birth; how many particles are
+// born depends on rendering as well (seen in chaos runs, 2026-11-06). Cosmetic: keep it out of the shared stream.
+HOOK_METHOD_PRIORITY(ParticleEmitter, OnUpdate, 9000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> ParticleEmitter::OnUpdate -> Begin (CoopGame.cpp)\n")
+    if (!CoopGame::InLockstep()) { super(); return; }
+    uint64_t s = CoopRng::GetSil();
+    super();
+    CoopRng::SetSil(s);
+}

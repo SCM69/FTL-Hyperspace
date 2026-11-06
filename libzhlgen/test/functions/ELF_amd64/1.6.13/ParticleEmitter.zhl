@@ -1,0 +1,4 @@
+"41544989fc55488daf00":  // unique sig
+cleanup __amd64 void ParticleEmitter::OnUpdate(ParticleEmitter *this); // 005ba3f0 DWARF original prototype
+"4156488d471c":  // unique sig
+cleanup __amd64 void ParticleEmitter::Birth(ParticleEmitter *this, float timeStep); // 005ba0a0 DWARF original prototype
