@@ -366,6 +366,11 @@ public:
     void OnPlayerLeft(int slot) override
     {
         Logf("LEAVE slot=%d", slot);
+        // Own crew: the leaver's crew members go to the captain, so nobody's crew is left without a commander.
+        if (g_session && g_session->IsHost() && g_inLockstep && slot > 0)
+            if (ShipManager* s = G_->GetShipManager(0))
+                for (size_t i = 0; i < s->vCrewList.size(); ++i)
+                    if (s->vCrewList[i] && CrewOwner(s->vCrewList[i]) == slot) SubmitLocal(CoopCommands::AssignCrew((int)i, 0));
         CoopOverlay::Post(slot == 0 ? "Lost the connection to the host" : "Player " + std::to_string(slot + 1) + " left");
     }
 };
@@ -648,6 +653,13 @@ void RunFrameEnd()
     // Tests: total frames over all epochs (a resync starts frame numbers again).
     static uint32_t framesBefore = 0, lastEpoch = 1;
     if (g_session->Epoch() != lastEpoch) { lastEpoch = g_session->Epoch(); framesBefore = g_totalFramesAtRestart; }
+    // Tests: FTL_COOP_TEST_QUIT_AT=F makes the highest-numbered guest leave at frame F (disconnect test).
+    static uint32_t quitAt = getenv("FTL_COOP_TEST_QUIT_AT") ? (uint32_t)atoi(getenv("FTL_COOP_TEST_QUIT_AT")) : 0;
+    if (quitAt && !g_session->IsHost() && f == quitAt)
+    {
+        std::vector<int> slots = g_session->Slots();
+        if (!slots.empty() && slots.back() == g_session->Slot()) { Quit("test quit"); return; }
+    }
     // Tests: FTL_COOP_EXIT_EPOCH=N counts only frames of epoch N and later (late-join tests).
     static uint32_t exitEpoch = getenv("FTL_COOP_EXIT_EPOCH") ? (uint32_t)atoi(getenv("FTL_COOP_EXIT_EPOCH")) : 0;
     if (exitEpoch)

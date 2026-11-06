@@ -1,4 +1,5 @@
 #include "rapidxml.hpp"
+#include "features/coop/CoopGame.h"
 #include "Resources.h"
 #include "CustomOptions.h"
 
@@ -297,7 +298,9 @@ void Global::PreInitializeResources(ResourceControl *resources)
     }
     catch (const char* e)
     {
-        ErrorMessage(e);
+        // FTL co-op runs without the Hyperspace.ftl data mod: a missing hyperspace.xml is expected there.
+        if (CoopGame::Active() && std::string(e) == "hyperspace.xml not found") hs_log_file("%s (co-op: running without Hyperspace.ftl)\n", e);
+        else ErrorMessage(e);
     }
 
     delete [] hyperspacetext;
@@ -1092,7 +1095,8 @@ void Global::InitializeResources(ResourceControl *resources)
     }
     catch (const char* e)
     {
-        ErrorMessage(std::string("Error parsing hyperspace.xml\n") + std::string(e));
+        if (CoopGame::Active() && std::string(e) == "hyperspace.xml not found") hs_log_file("%s (co-op: running without Hyperspace.ftl)\n", e);
+        else ErrorMessage(std::string("Error parsing hyperspace.xml\n") + std::string(e));
     }
     catch (...)
     {

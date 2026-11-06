@@ -370,7 +370,10 @@ void Apply(int slot, const Bytes& cmd)
     {
         bool on = r.u8() != 0;
         ShipManager* sm = Ship(0);
-        if (sm && sm->cloakSystem) sm->cloakSystem->SetTurnedOn(on);
+        // Commands are checked like the game's own buttons check them (a network command must not do what the UI
+        // would refuse: a hacking pulse with no target froze both copies, 2026-11-06).
+        if (sm && sm->cloakSystem && (!on || sm->cloakSystem->Ready()) && !((ShipSystem*)sm->cloakSystem)->GetLocked())
+            sm->cloakSystem->SetTurnedOn(on);
         break;
     }
     case C_BATTERY:
@@ -383,7 +386,9 @@ void Apply(int slot, const Bytes& cmd)
     case C_HACK_PULSE:
     {
         ShipManager* sm = Ship(0);
-        if (sm && sm->hackingSystem) sm->hackingSystem->InitiatePulse();
+        if (sm && sm->hackingSystem && Ship(1) && sm->hackingSystem->bHacking && sm->hackingSystem->CanPulse() &&
+            !((ShipSystem*)sm->hackingSystem)->GetLocked())
+            sm->hackingSystem->InitiatePulse();
         break;
     }
     case C_HACK_TARGET:
@@ -391,7 +396,8 @@ void Apply(int slot, const Bytes& cmd)
         int ship = r.u8(); int type = r.u8();
         ShipManager* sm = Ship(0);
         ShipSystem* target = SystemOf(Ship(ship), type);
-        if (sm && sm->hackingSystem && target) sm->hackingSystem->StartHacking(target);
+        if (sm && sm->hackingSystem && target && ship == 1 && sm->hackingSystem->CanHack() && sm->tempDroneCount > 0)
+            sm->hackingSystem->StartHacking(target);
         break;
     }
     case C_MIND:
@@ -401,14 +407,17 @@ void Apply(int slot, const Bytes& cmd)
         ShipManager* sm = Ship(0);
         std::vector<CrewMember*> crew;
         for (int k = 0; k < n; ++k) { CrewMember* c = CrewAt(target, r.u16()); if (c) crew.push_back(c); }
-        if (sm && sm->mindSystem) sm->mindSystem->QueueMindControl(&crew, room, ship);
+        if (sm && sm->mindSystem && target && !crew.empty() && sm->mindSystem->CanUse())
+            sm->mindSystem->QueueMindControl(&crew, room, ship);
         break;
     }
     case C_TELEPORT:
     {
         int room = (int16_t)r.u16(); int command = r.i32();
         CompleteShip* me = G_->GetWorld()->playerShip;
-        if (me) { CoopCommands::g_applyingTeleport = true; me->InitiateTeleport(room, command); CoopCommands::g_applyingTeleport = false; }
+        ShipManager* sm = Ship(0);
+        if (me && sm && sm->teleportSystem && (sm->teleportSystem->CanSend() || sm->teleportSystem->Charged()))
+        { CoopCommands::g_applyingTeleport = true; me->InitiateTeleport(room, command); CoopCommands::g_applyingTeleport = false; }
         break;
     }
     case C_ASSIGN_CREW:

@@ -25,14 +25,23 @@ Like Hyperspace (see wiki/Building-on-Linux.md):
 
     buildscripts/docker-run-in-devcontainer.sh buildscripts/linux-1.6.13/build-releaseonly.sh
 
-## Run (for now: environment variables or a `coop.cfg` next to `FTL.amd64`)
+## Install (Linux, Steam FTL 1.6.13)
+
+Put `Hyperspace.1.6.13.amd64.so` (from the build) next to `Release Files/Linux/coop-install.sh` and run
+`./coop-install.sh` (or `./coop-install.sh "/path/to/FTL Faster Than Light"`). It checks the game's SHA-256, copies the
+library into `data/`, writes `data/coop.cfg`, and changes the start script `data/FTL` so that only the game loads the
+library (backup `data/FTL.before-coop`). Edit `coop.cfg`, start FTL from Steam. `./coop-install.sh --uninstall` undoes
+it. The Hyperspace.ftl data mod is not needed. A Steam update or file check restores `data/FTL`: run the installer again.
+
+## Run (environment variables or a `coop.cfg` next to `FTL.amd64`)
 
     # host                                  # guest
     FTL_COOP=host FTL_COOP_PLAYERS=2        FTL_COOP=guest FTL_COOP_ADDR=<host ip>:27890
     LD_PRELOAD=./Hyperspace.1.6.13.amd64.so ./FTL.amd64
 
-The host's run starts when `FTL_COOP_PLAYERS` players are connected, or with F9. F10 resyncs
-everyone from the host's save. Direct TCP on port 27890: internet play needs port forwarding or a VPN.
+The host's run starts when `FTL_COOP_PLAYERS` players are connected, or with F9. Host keys: F10 resyncs everyone
+from the host's save, F11 switches ship sharing, F7 gives the selected crew members to the next player (own-crew mode
+shows P1..P8 over each crew member). Players can join a running game (everyone reloads the host's save). Direct TCP on port 27890: internet play needs port forwarding or a VPN.
 `coop.cfg` keys: `role`, `address`, `port`, `name`, `players`, `mode` (ffa|owncrew), `start` (new|continue).
 
 ## Tests
@@ -46,7 +55,7 @@ everyone from the host's save. Direct TCP on port 27890: internet play needs por
 
 ## Known gaps
 
-Store purchases, upgrades, teleporter, hacking, mind control, cloaking, batteries, crew abilities and
-sector-exit choices are not commands yet: if a guest uses them, the host detects a desync and
-resyncs everyone. No lobby or Steam networking yet. Write-up and notes:
+Store, upgrades, equipment and the crew screen are the captain's: guests' clicks there are ignored, and closing
+them after a change makes everyone reload the host's save. Sector-exit choices and Hyperspace crew abilities are not
+commands yet: using them makes the host resync everyone. A resync waits for a quiet moment (no jump, no dialog). No lobby or Steam networking yet. Write-up and notes:
 [coop-anything games/faster-than-light](https://github.com/cranebeaker/coop-anything).

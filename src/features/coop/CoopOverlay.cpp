@@ -56,3 +56,48 @@ HOOK_METHOD_PRIORITY(CApp, OnRender, -2000, () -> void)
     super();
     CoopOverlay::Render();
 }
+
+// Own-crew mode: show which player commands each crew member (P1 = host). Same on every copy: owners are assigned in
+// crew-list order and changed only by lockstep commands.
+static const GL_Color kPlayerColors[8] = {
+    GL_Color(1.f, 1.f, 1.f, 1.f), GL_Color(0.4f, 0.8f, 1.f, 1.f), GL_Color(1.f, 0.6f, 0.2f, 1.f), GL_Color(0.5f, 1.f, 0.4f, 1.f),
+    GL_Color(1.f, 0.4f, 0.8f, 1.f), GL_Color(1.f, 1.f, 0.3f, 1.f), GL_Color(0.7f, 0.5f, 1.f, 1.f), GL_Color(0.3f, 1.f, 0.9f, 1.f) };
+
+HOOK_METHOD_PRIORITY(CrewMember, OnRender, -2000, (bool outlineOnly) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> CrewMember::OnRender -> Begin (CoopOverlay.cpp)\n")
+    super(outlineOnly);
+    if (outlineOnly || bDead || !CoopGame::InLockstep() || CoopGame::CurrentMode() != CoopGame::Mode::OwnCrew) return;
+    if (iShipId != 0) return; // the player ship's crew only (also when they board the enemy)
+    int owner = CoopGame::CrewOwner(this);
+    if (owner < 0 || owner > 7) return;
+    CSurface::GL_SetColor(kPlayerColors[owner]);
+    freetype::easy_printCenter(6, x, y - 24.f, "P" + std::to_string(owner + 1));
+}
+
+// F7 (host): give the selected crew members to the next player.
+HOOK_METHOD_PRIORITY(CApp, OnKeyDown, 8000, (SDLKey key) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> CApp::OnKeyDown -> Begin (CoopOverlay.cpp)\n")
+    coop::Session* s = CoopGame::GetSession();
+    if (key == SDLK_F7 && CoopGame::InLockstep() && s && s->IsHost() && G_->GetWorld()->commandGui)
+    {
+        CrewControl& cc = G_->GetWorld()->commandGui->crewControl;
+        ShipManager* ship = G_->GetShipManager(0);
+        std::vector<int> slots = s->Slots();
+        for (CrewMember* c : cc.selectedCrew)
+        {
+            int idx = -1;
+            for (size_t i = 0; ship && i < ship->vCrewList.size(); ++i) if (ship->vCrewList[i] == c) idx = (int)i;
+            if (idx < 0 || slots.empty()) continue;
+            int cur = CoopGame::CrewOwner(c);
+            size_t k = 0;
+            while (k < slots.size() && slots[k] != cur) ++k;
+            int next = slots[(k + 1) % slots.size()];
+            CoopGame::SubmitLocal(CoopCommands::AssignCrew(idx, next));
+            CoopOverlay::Post(std::string("Crew member given to player ") + std::to_string(next + 1));
+        }
+        return;
+    }
+    super(key);
+}
