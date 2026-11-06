@@ -22,7 +22,8 @@ BUILD_ID="test-$(sha256sum "$SO" | cut -c1-12)"
 pids=()
 for ((i=0; i<N; i++)); do
   C="$OUT/copy$i"
-  rm -rf "$C/user" "$C/coop.log"
+  # FTL_COOP_KEEP_USER=1 keeps the save folder from the previous run (continue tests).
+  if [ "${FTL_COOP_KEEP_USER:-0}" = 1 ]; then rm -f "$C/coop.log"; else rm -rf "$C/user" "$C/coop.log"; fi
   mkdir -p "$C/user/FasterThanLight"
   # Skip the first-launch language chooser; sound off; 60 FPS frame limit; Advanced Edition on; normal difficulty.
   for f in "$C/user/settings.ini" "$C/user/FasterThanLight/settings.ini"; do
