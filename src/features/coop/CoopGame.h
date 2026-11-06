@@ -15,6 +15,9 @@ struct Config
     bool host = false;
     std::string addr = "127.0.0.1";
     int port = 27890;
+    std::string net = "steam";    // steam (lobby, no address) or tcp (address:port)
+    std::string friendName;       // guest over Steam: join this friend (part of their Steam name); empty = any friend
+    uint64_t lobby = 0;           // guest over Steam: join this lobby id directly
     std::string name = "player";
     int waitPlayers = 0;          // host: start automatically when this many players are in (0 = manual, F9)
     Mode mode = Mode::FreeForAll;
@@ -35,8 +38,14 @@ bool Active();                    // co-op configured
 bool InLockstep();                // lockstep running in a game
 bool Applying();                  // true while a networked command is applied
 coop::Session* GetSession();
+std::string NetStatus();          // Steam lobby status line, or a network error; empty for TCP
 int LocalSlot();
 void Log(const std::string& line);
+void Logf(const char* fmt, ...)
+#ifdef __GNUC__
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
 void RequestResync(const char* why);
 void RequestResyncSoon(const char* why);   // at the start of the next loop, outside any game code
 

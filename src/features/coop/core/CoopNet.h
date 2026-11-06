@@ -1,7 +1,7 @@
 #pragma once
-// FTL co-op: message transport. Game-independent, C++11, POSIX sockets.
+// FTL co-op: message transport. Game-independent, C++11, POSIX sockets / Winsock.
 // Messages are length-prefixed frames over TCP (reliable, ordered), which is what lockstep needs.
-// A Steam P2P transport can implement the same interface later.
+// SteamTransport (CoopSteamNet.h) implements the same interface over Steam lobbies and P2P.
 
 #include <cstdint>
 #include <string>

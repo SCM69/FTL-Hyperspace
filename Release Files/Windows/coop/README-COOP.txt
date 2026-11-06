@@ -8,8 +8,10 @@ Not an official Hyperspace release. Source: https://github.com/SCM69/FTL-Hypersp
 Everyone in a game needs:
   - Windows FTL 1.6.9 (Hyperspace's version). Steam FTL is newer: roll it back with
     https://github.com/FTL-Hyperspace/FTL-Version-Rollback (Code -> Download ZIP, copy into the FTL folder,
-    run rollback.bat).
+    run rollback.bat). The original game is kept as FTLGame_orig.exe. A Steam update or "Verify integrity of
+    game files" brings back the newer FTL: run rollback.bat again.
   - The same co-op files from this zip. Windows and Linux players cannot play together.
+  - Steam running, and the other players as Steam friends.
 
 Install
   1. Copy Hyperspace.dll, xinput1_4.dll and coop-install.bat into the FTL folder (where FTLGame.exe is,
@@ -17,11 +19,14 @@ Install
   2. Run coop-install.bat there. It checks the game version and writes coop.cfg.
   3. Edit coop.cfg with Notepad:
        host:   role=host   players=<how many of you>
-       guests: role=guest  address=<host's IP>:27890
-  4. Start FTL from Steam. The host's run starts when everyone is connected (or the host presses F9).
+       guests: role=guest
+  4. The host starts FTL from Steam first. It opens a friends-only Steam lobby (top left of the screen says so).
+     Guests then start FTL: the game finds the friend who hosts and joins. With several friends hosting, set
+     friend=<part of the host's Steam name> in coop.cfg. The run starts when everyone is in (or the host presses F9).
 
-Internet play: the host forwards TCP port 27890 on their router, or everyone joins the same VPN
-(for example a LAN tunnel), and allows FTL through Windows Firewall when Windows asks.
+No IP addresses, port forwarding or VPN: Steam connects the players (through Valve's relays when needed).
+Without Steam, set net=tcp: guests set address=<host's IP>:27890, and the host forwards TCP port 27890 on
+their router (or everyone joins the same VPN) and allows FTL through Windows Firewall.
 
 Keys (host): F9 start now, F10 resync everyone, F11 switch ship sharing (free-for-all / own crew),
 F7 give selected crew to the next player. Jumps, event choices, store and upgrades are the host's.

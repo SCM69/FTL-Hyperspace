@@ -33,8 +33,12 @@ if exist "coop.cfg" (
         echo # FTL Co-op settings. Lines starting with # are ignored.
         echo # role: host ^(you run the game others join^) or guest ^(you join a host^). Remove the line to play alone.
         echo role=host
-        echo # guest: the host's address and port, for example 203.0.113.7:27890 ^(the host must forward TCP port 27890,
-        echo # or everyone uses a VPN such as a LAN tunnel^)
+        echo # net=steam: the host opens a friends-only Steam lobby; guests join a Steam friend who hosts. No addresses.
+        echo # net=tcp: connect by address instead ^(the host forwards TCP port 27890, or everyone uses a VPN^)
+        echo net=steam
+        echo # guest, Steam: join this friend ^(part of their Steam name^); leave empty to join any friend who hosts
+        echo friend=
+        echo # guest, tcp: the host's address and port, for example 203.0.113.7:27890
         echo address=127.0.0.1:27890
         echo port=27890
         echo name=Captain
@@ -48,8 +52,8 @@ if exist "coop.cfg" (
     echo Wrote coop.cfg.
 )
 echo.
-echo Edit coop.cfg ^(role, address, players^), then start FTL from Steam as usual.
-echo The host: allow FTL through Windows Firewall when Windows asks.
+echo Edit coop.cfg ^(role, players^), then start FTL from Steam as usual. Steam must be running.
+echo Guests: start FTL after your friend has; you join their Steam lobby automatically.
 goto :end
 
 :uninstall

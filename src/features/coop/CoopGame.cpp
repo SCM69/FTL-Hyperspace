@@ -3,6 +3,8 @@
 #include "CoopGame.h"
 #include "CoopCommands.h"
 #include "CoopRng.h"
+#include "CoopSteam.h"
+#include "core/CoopSteamHub.h"
 #include "Global.h"
 #include "Seeds.h"
 #include "overrides/FileHelper.h"
@@ -32,7 +34,11 @@ namespace CoopGame {
 static Config g_cfg;
 static bool g_cfgLoaded = false;
 static FILE* g_log = nullptr;
-static std::unique_ptr<coop::TcpTransport> g_transport;
+static std::unique_ptr<coop::Transport> g_transport;
+static coop::TcpTransport* g_tcp = nullptr;         // when net=tcp
+static coop::SteamTransport* g_steam = nullptr;     // when net=steam
+static std::unique_ptr<coop::HubSteam> g_hubSteam;  // tests: Steam stand-in (FTL_COOP_FAKE_STEAM)
+static std::string g_netError;
 static std::unique_ptr<coop::Session> g_session;
 static bool g_applying = false;
 static bool g_inLockstep = false;
@@ -94,6 +100,10 @@ const Config& GetConfig()
     if (colon != std::string::npos) { g_cfg.port = atoi(addr.substr(colon + 1).c_str()); addr = addr.substr(0, colon); }
     g_cfg.addr = addr;
     g_cfg.port = atoi(get("FTL_COOP_PORT", "port", std::to_string(g_cfg.port)).c_str());
+    // net=steam (default): friends-only Steam lobby, no addresses. net=tcp: direct connection to address:port.
+    g_cfg.net = get("FTL_COOP_NET", "net", "steam") == "tcp" ? "tcp" : "steam";
+    g_cfg.friendName = get("FTL_COOP_FRIEND", "friend", "");
+    g_cfg.lobby = strtoull(get("FTL_COOP_LOBBY", "lobby", "0").c_str(), nullptr, 10);
     g_cfg.name = get("FTL_COOP_NAME", "name", g_cfg.host ? "host" : "guest");
     g_cfg.waitPlayers = atoi(get("FTL_COOP_PLAYERS", "players", std::to_string(g_cfg.waitPlayers)).c_str());
     g_cfg.mode = get("FTL_COOP_MODE", "mode", "ffa") == "owncrew" ? Mode::OwnCrew : Mode::FreeForAll;
@@ -129,7 +139,7 @@ void Log(const std::string& line)
     fflush(g_log);
 }
 
-static void Logf(const char* fmt, ...)
+void Logf(const char* fmt, ...)
 {
     char buf[1024];
     va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof(buf), fmt, ap); va_end(ap);
@@ -476,15 +486,54 @@ static void InitSession()
 #endif
     s.buildId = platform + ", mod built " + __DATE__ + " " + __TIME__;
     if (!Env("FTL_COOP_BUILD_ID").empty()) s.buildId = platform + ", " + Env("FTL_COOP_BUILD_ID");
-    g_transport.reset(new coop::TcpTransport());
-    if (getenv("FTL_COOP_TEST_LATENCY_MS")) g_transport->SetTestLatencyMs(atoi(getenv("FTL_COOP_TEST_LATENCY_MS")));
+    bool solo = Env("FTL_COOP") == "solo";
+    std::string err;
+    coop::SteamApi* steamApi = nullptr;
+    if (c.net == "steam" && !solo)
+    {
+        std::string fake = Env("FTL_COOP_FAKE_STEAM");
+        if (!fake.empty())
+        {
+            size_t colon = fake.rfind(':');
+            coop::Hasher h; h.add(c.name.data(), c.name.size());
+            g_hubSteam.reset(new coop::HubSteam(h.h | 1, c.name));
+            if (colon != std::string::npos && g_hubSteam->Connect(fake.substr(0, colon), atoi(fake.c_str() + colon + 1), &err)) steamApi = g_hubSteam.get();
+            else err = "test Steam hub not reachable at " + fake + ": " + err;
+        }
+        else steamApi = CoopSteam::Open(&err);
+        if (!steamApi)
+        {
+            g_netError = "Steam: " + err;
+            Log("ERROR: " + g_netError + ". Set net=tcp in coop.cfg to connect by address instead.");
+            CoopCommands::ShowMessage("Co-op: " + g_netError + " (or set net=tcp in coop.cfg)");
+            return;   // co-op stays configured without a session: the overlay shows the error
+        }
+    }
+    if (steamApi)
+    {
+        g_steam = new coop::SteamTransport(steamApi);
+        g_steam->onLog = [](const std::string& line) { Log(line); };
+        g_transport.reset(g_steam);
+    }
+    else
+    {
+        g_tcp = new coop::TcpTransport();
+        if (getenv("FTL_COOP_TEST_LATENCY_MS")) g_tcp->SetTestLatencyMs(atoi(getenv("FTL_COOP_TEST_LATENCY_MS")));
+        g_transport.reset(g_tcp);
+    }
     // The session installs the transport callbacks, so it must exist before Connect (which says hello).
     g_session.reset(new coop::Session(g_transport.get(), &g_adapter, s, c.host, c.name));
     g_session->SetAllowLateJoin(true);
     g_start.mode = c.mode;
-    std::string err;
-    bool ok = c.host ? (Env("FTL_COOP") == "solo" ? true : g_transport->Listen(c.port, &err))
-                     : g_transport->Connect(c.addr, c.port, &err);
+    if (g_steam)
+    {
+        if (c.host) g_steam->Host(8, { { "build", s.buildId }, { "name", c.name } });
+        else g_steam->Join(c.lobby, c.friendName, s.buildId);
+        Logf("co-op %s ready over Steam: name=%s mode=%s bot=%s build=%s", c.host ? "host" : "guest", c.name.c_str(),
+             c.mode == Mode::OwnCrew ? "owncrew" : "ffa", c.bot.c_str(), s.buildId.c_str());
+        return;
+    }
+    bool ok = c.host ? (solo ? true : g_tcp->Listen(c.port, &err)) : g_tcp->Connect(c.addr, c.port, &err);
     if (!ok)
     {
         Log("ERROR: network: " + err);
@@ -493,6 +542,13 @@ static void InitSession()
     }
     Logf("co-op %s ready: %s:%d name=%s mode=%s bot=%s build=%s", c.host ? "host" : "guest", c.addr.c_str(), c.port,
          c.name.c_str(), c.mode == Mode::OwnCrew ? "owncrew" : "ffa", c.bot.c_str(), s.buildId.c_str());
+}
+
+std::string NetStatus()
+{
+    if (!g_netError.empty()) return g_netError;
+    if (g_steam) return g_steam->Status();
+    return std::string();
 }
 
 // Run start: driven from CApp::OnLoop, a few frames per stage like the Hyperspace test scenarios.
@@ -666,7 +722,7 @@ int BeforeLoop()
     if (!inited) { inited = true; CoopRng::MarkMainThread(); InitSession(); }
     if (!Active() || !g_session) return 1;
     // Guest: (re)connect every 3 seconds until the host answers (it may start later than we do).
-    if (!GetConfig().host && !g_transport->Connected() && !g_session->Started())
+    if (g_tcp && !GetConfig().host && !g_tcp->Connected() && !g_session->Started())
     {
         static double nextTry = 0;
         double now = (double)time(nullptr);
@@ -674,7 +730,7 @@ int BeforeLoop()
         {
             nextTry = now + 3;
             std::string err;
-            if (g_transport->Connect(GetConfig().addr, GetConfig().port, &err)) Log("connected to the host");
+            if (g_tcp->Connect(GetConfig().addr, GetConfig().port, &err)) Log("connected to the host");
             else { static int tries = 0; if (tries++ % 10 == 0) Log("waiting for the host at " + GetConfig().addr + ": " + err); }
         }
     }

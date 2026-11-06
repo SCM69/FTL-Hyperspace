@@ -1,4 +1,5 @@
 #include "CoopNet.h"
+#include "CoopSteamNet.h"
 
 #include <cerrno>
 #include <ctime>
@@ -38,8 +39,6 @@ static std::string LastError() { return strerror(errno); }
 static bool StartSockets() { return true; }
 static const int kNoSignal = MSG_NOSIGNAL;
 #endif
-
-static const uint32_t MAX_MSG = 64u * 1024u * 1024u; // save transfers can be large
 
 static void SetNonBlocking(int fd)
 {
@@ -162,10 +161,7 @@ void TcpTransport::SendNow(int peer, const Bytes& msg)
 {
     Conn* c = Find(peer);
     if (!c) return;
-    uint32_t n = (uint32_t)msg.size();
-    uint8_t hdr[4] = { (uint8_t)n, (uint8_t)(n >> 8), (uint8_t)(n >> 16), (uint8_t)(n >> 24) };
-    c->out.insert(c->out.end(), hdr, hdr + 4);
-    c->out.insert(c->out.end(), msg.begin(), msg.end());
+    AppendFrame(c->out, msg);
     FlushConn(*c);
 }
 
@@ -197,17 +193,8 @@ void TcpTransport::ReadConn(Conn& c)
         else if (WouldBlock()) break;
         else { c.dead = true; break; }
     }
-    size_t off = 0;
-    while (c.in.size() - off >= 4)
-    {
-        uint32_t n = c.in[off] | (c.in[off + 1] << 8) | (c.in[off + 2] << 16) | ((uint32_t)c.in[off + 3] << 24);
-        if (n > MAX_MSG) { c.dead = true; break; }
-        if (c.in.size() - off - 4 < n) break;
-        Bytes msg(c.in.begin() + off + 4, c.in.begin() + off + 4 + n);
-        off += 4 + n;
-        if (onMessage) onMessage(c.id, msg);
-    }
-    if (off) c.in.erase(c.in.begin(), c.in.begin() + off);
+    int id = c.id;
+    if (!PopFrames(c.in, [&](const Bytes& msg) { if (onMessage) onMessage(id, msg); })) c.dead = true;
 }
 
 void TcpTransport::Poll()

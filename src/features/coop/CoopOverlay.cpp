@@ -34,6 +34,7 @@ void Render()
     if (!CoopGame::Active()) return;
     coop::Session* s = CoopGame::GetSession();
     std::string head = "Co-op ";
+    std::string net = CoopGame::NetStatus();
     if (!s) head += "(network error, see coop.log)";
     else
     {
@@ -46,6 +47,8 @@ void Render()
     freetype::easy_print(6, 8.f, 4.f, head);
     double now = Now();
     float y = 18.f;
+    // Steam lobby state (or the network error) until the run starts.
+    if (!net.empty() && (!s || !s->Started())) { freetype::easy_print(6, 8.f, y, net); y += 13.f; }
     for (auto it = g_lines.begin(); it != g_lines.end();)
     {
         if (it->until < now) { it = g_lines.erase(it); continue; }

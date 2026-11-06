@@ -32,6 +32,19 @@ if [ $WIN = 1 ]; then
 fi
 mkdir -p "$OUT"
 BUILD_ID="test-$(sha256sum "$SO" | cut -c1-12)"
+# COOP_NET=tcp (default) connects the copies directly; COOP_NET=fakesteam runs them over the Steam transport with
+# tests/coop/fakesteam_hub.py standing in for Steam (lobby, friends' game info, P2P packets).
+COOP_NET=${COOP_NET:-tcp}
+HUB_PID=
+if [ "$COOP_NET" = fakesteam ]; then
+  HUB_PORT=$((PORT + 1))
+  python3 -I "$(dirname "$(readlink -f "$0")")/fakesteam_hub.py" "$HUB_PORT" ${HUB_LAG_MS:+--lag-ms $HUB_LAG_MS} > "$OUT/hub.log" 2>&1 &
+  HUB_PID=$!
+  sleep 1
+  export FTL_COOP_NET=steam FTL_COOP_FAKE_STEAM=127.0.0.1:$HUB_PORT
+else
+  export FTL_COOP_NET=tcp
+fi
 
 pids=()
 for ((i=0; i<N; i++)); do
@@ -87,5 +100,6 @@ for ((i=0; i<N; i++)); do
 done
 rc=0
 for p in "${pids[@]}"; do wait "$p" || rc=$?; done
+[ -n "$HUB_PID" ] && kill "$HUB_PID" 2>/dev/null
 echo "copies exited (last nonzero rc=$rc)"
 python3 -I "$(dirname "$(readlink -f "$0")")/compare_logs.py" "$OUT" "$N" "$FRAMES"
