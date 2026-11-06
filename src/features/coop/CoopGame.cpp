@@ -20,6 +20,8 @@
 #include <memory>
 #include <sstream>
 
+namespace CoopCaptain { bool SuppressDesync(); }
+
 namespace CoopGame {
 
 static Config g_cfg;
@@ -31,7 +33,9 @@ static bool g_applying = false;
 static bool g_inLockstep = false;
 static bool g_quitRequested = false;
 uint32_t g_catchupFrames = 0;
-static uint32_t g_totalFramesAtRestart = 0; // frames run in earlier epochs   // extra frames run in the same loop (guest catching up)
+static uint32_t g_totalFramesAtRestart = 0; // frames run in earlier epochs
+static uint32_t g_frameEpoch = 0;            // epoch the running frame started in
+static std::string g_pendingResync;          // host: resync requested, runs at the next quiet loop   // extra frames run in the same loop (guest catching up)
 
 static const float FIXED_SPEED = 16.0f / 60.0f; // FTL: 16 speed units per second, 60 lockstep frames per second
 
@@ -314,6 +318,17 @@ public:
              (unsigned long long)p.all, (unsigned long long)p.rng, (unsigned long long)p.time, (unsigned long long)p.player,
              (unsigned long long)p.crew, (unsigned long long)p.enemy, (unsigned long long)p.ui, CoopRng::g_randCalls, CoopRng::g_randCallsAll, CoopRng::g_r32Calls);
         if (CoopRng::Tracing()) Log("RNGTRACE " + CoopRng::TraceDump());
+        if (g_session && g_session->Frame() <= 30)
+        {
+            CommandGui* gui = Gui();
+            StarMap& map = G_->GetWorld()->starMap;
+            int cur = -1;
+            for (size_t i = 0; i < map.locations.size(); ++i) if (map.locations[i] == map.currentLoc) cur = (int)i;
+            Logf("UIDETAIL paused=%d auto=%d menu_pause=%d choice=%d loc=%d/%zu level=%d ready=%d time=%.4f speed=%.4f",
+                 gui ? (int)gui->bPaused : -1, gui ? (int)gui->bAutoPaused : -1, gui ? (int)gui->menu_pause : -1,
+                 gui ? (int)gui->choiceBox.bOpen : -1, cur, map.locations.size(), map.worldLevel, (int)map.readyToTravel,
+                 G_->GetCFPS()->RunningTime, G_->GetCFPS()->SpeedFactor);
+        }
         return p.all;
     }
     void OnLog(const std::string& line) override { Log("net: " + line); }
@@ -338,6 +353,7 @@ public:
     void OnDesync(uint32_t frame, int slot, uint64_t mine, uint64_t theirs) override
     {
         Logf("DESYNC frame=%u slot=%d mine=%016llx theirs=%016llx", frame, slot, (unsigned long long)mine, (unsigned long long)theirs);
+        if (CoopCaptain::SuppressDesync()) { Log("desync while the captain's screen is open: resync when it closes"); return; }
         if (g_session && g_session->IsHost() && GetConfig().autoResync) RequestResync("desync");
     }
     void OnReject(const std::string& reason) override { Log("REJECTED " + reason); CoopCommands::ShowMessage("Not allowed: " + reason); }
@@ -432,8 +448,24 @@ static void StepStart()
     }
     else if (g_startStage == StartStage::LoadToMenu)
     {
+        // Close the captain's screens first: reloading right after the ship screen was used crashed in
+        // CustomEquipment::SetPosition (CommandGui::LinkShip -> TabbedWindow::AddWindow) on the host (2026-11-06).
+        CommandGui* gui = Gui();
+        if (gui && (gui->shipScreens.bOpen || gui->storeScreens.bOpen))
+        {
+            if (gui->shipScreens.bOpen) gui->shipScreens.Close();
+            if (gui->storeScreens.bOpen) gui->storeScreens.Close();
+            g_startWait = 0;
+            return;
+        }
+        if (!menu.bOpen && g_startWait < 3) return;
         // Back to the main menu first (the game auto-saves when its menu opens over a game; wait for that).
-        if (!menu.bOpen) { menu.Open(); g_startWait = 0; return; }
+        if (!menu.bOpen)
+        {
+            if (g_startWait == 1 || g_startWait % 120 == 0) Logf("load: opening the main menu (try %d)", g_startWait);
+            menu.Open();
+            return;
+        }
         if (g_startWait < 3) return;
         g_startStage = StartStage::LoadFile; g_startWait = 0;
     }
@@ -447,6 +479,15 @@ static void StepStart()
         CoopRng::SetSil(g_start.seed);
         SetSeed(g_start.seed);
         G_->GetTutorialManager()->Stop();
+        // LoadGame relinks the ship screens; Hyperspace's CustomEquipment::SetPosition then reads the screens' pointer
+        // to the previous game's ShipManager, which is gone (use-after-free; crashed the host after it had used the
+        // ship screen). SetPosition skips layout when the pointer is null; LinkShip sets the new ship afterwards.
+        if (CommandGui* gui = Gui())
+        {
+            gui->equipScreen.shipManager = nullptr;
+            gui->upgradeScreen.shipManager = nullptr;
+            gui->crewScreen.shipManager = nullptr;
+        }
         G_->GetWorld()->LoadGame(path);
         menu.Close();
         Log("save loaded: " + std::to_string(g_start.save.size()) + " bytes");
@@ -459,6 +500,9 @@ static void StepStart()
         CoopRng::SetSil(g_start.seed ^ 0x7f4a7c15u);
         Global::seededRng = std::mt19937(g_start.seed);
         G_->GetCFPS()->RunningTime = 0.f;
+        // Pause flags live in CommandGui and survive a reload (the host's could differ, e.g. after its ship screen).
+        if (CommandGui* gui = Gui()) { gui->bPaused = false; gui->bAutoPaused = false; }
+        SetSharedMenuPause();
         g_inLockstep = true;
         g_startStage = StartStage::None;
         for (size_t i = 0; i < g_start.owners.size(); ++i) SetCrewOwner((int)i, g_start.owners[i]);
@@ -484,9 +528,29 @@ static void HostMaybeStart()
     }
 }
 
+void RequestResyncSoon(const char* why) { g_pendingResync = why; }
+
+// A save taken during a jump (readyToTravel set, or the jump running) or with an event dialog open did not load the
+// same on every copy (host at location 6, guest at 3 after a save one frame into a jump, 2026-11-06). Wait for a
+// quiet moment.
+static bool QuietForSave()
+{
+    ShipManager* s = G_->GetShipManager(0);
+    CommandGui* gui = Gui();
+    StarMap& map = G_->GetWorld()->starMap;
+    return s && gui && !s->bJumping && !map.readyToTravel && !gui->choiceBox.bOpen && !gui->IsGameOver();
+}
+
 void RequestResync(const char* why)
 {
     if (!g_session || !g_session->IsHost() || !g_inLockstep) return;
+    if (!QuietForSave())
+    {
+        static uint32_t waits = 0;
+        if (waits++ % 300 == 0) Log(std::string("resync (") + why + ") waits for the jump or dialog to finish");
+        g_pendingResync = why;
+        return;
+    }
     static clock_t last = 0;
     clock_t now = clock();
     if (last && (double)(now - last) / CLOCKS_PER_SEC < 2.0 && strcmp(why, "late join") != 0) return; // no resync storms
@@ -529,6 +593,7 @@ int BeforeLoop()
     if (!inited) { inited = true; CoopRng::MarkMainThread(); InitSession(); }
     if (!Active() || !g_session) return 1;
     g_session->Poll();
+    if (!g_pendingResync.empty() && g_inLockstep) { std::string why = g_pendingResync; g_pendingResync.clear(); RequestResync(why.c_str()); }
     static int loops = 0;
     if (!g_session->Started() && (++loops % 120) == 1)
     {
@@ -560,6 +625,7 @@ bool RunFrameBegin()
         return false;
     }
     hostStall = 0;
+    g_frameEpoch = g_session->Epoch();
     SetSharedMenuPause();
     CoopBot::BeforeFrame(g_session->Frame());
     return true;
@@ -567,6 +633,8 @@ bool RunFrameBegin()
 
 void RunFrameEnd()
 {
+    // A resync started during this frame (e.g. the captain closed a screen): the frame belongs to the old run.
+    if (g_session->Epoch() != g_frameEpoch || !g_inLockstep) return;
     G_->GetCFPS()->SpeedFactor = FIXED_SPEED; // in case something in the frame recomputed it
     g_session->EndFrame();
     uint32_t f = g_session->Frame();

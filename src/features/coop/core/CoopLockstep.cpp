@@ -197,21 +197,28 @@ void Session::HostCompare(uint32_t frame)
     if (it == m_hashes.end()) return;
     auto mine = it->second.find(0);
     if (mine == it->second.end()) return;
+    // Collect first: a callback may restart the session (resync), which clears m_hashes.
+    struct Bad { int slot; uint64_t theirs; };
+    std::vector<Bad> bad;
+    uint64_t my = mine->second;
     for (auto& kv : it->second)
-    {
-        if (kv.first == 0 || kv.second == mine->second) continue;
-        ++m_desyncs;
-        char buf[160];
-        snprintf(buf, sizeof(buf), "DESYNC frame %u slot %d host %016llx guest %016llx", frame, kv.first,
-                 (unsigned long long)mine->second, (unsigned long long)kv.second);
-        Log(buf);
-        if (m_adapter) m_adapter->OnDesync(frame, kv.first, mine->second, kv.second);
-        Writer w; w.u8(MSG_DESYNC); w.u32(frame); w.i32(kv.first);
-        for (auto& p : m_peers) if (p.second.welcomed) m_t->Send(p.first, w.b);
-    }
+        if (kv.first != 0 && kv.second != my) bad.push_back(Bad{ kv.first, kv.second });
     // Keep only recent frames.
     while (!m_hashes.empty() && m_hashes.begin()->first + m_s.window * 4 + m_s.hashEvery * 4 < frame)
         m_hashes.erase(m_hashes.begin());
+    uint32_t epoch = m_epoch;
+    for (const Bad& b : bad)
+    {
+        if (m_epoch != epoch) break; // restarted by an earlier callback
+        ++m_desyncs;
+        char buf[160];
+        snprintf(buf, sizeof(buf), "DESYNC frame %u slot %d host %016llx guest %016llx", frame, b.slot,
+                 (unsigned long long)my, (unsigned long long)b.theirs);
+        Log(buf);
+        Writer w; w.u8(MSG_DESYNC); w.u32(frame); w.i32(b.slot);
+        for (auto& p : m_peers) if (p.second.welcomed) m_t->Send(p.first, w.b);
+        if (m_adapter) m_adapter->OnDesync(frame, b.slot, my, b.theirs);
+    }
 }
 
 void Session::SendChat(const std::string& text)

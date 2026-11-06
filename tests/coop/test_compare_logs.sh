@@ -6,7 +6,7 @@ fails=0
 check() { # name expected log0 log1
   d=$S/$1; mkdir -p $d/copy0 $d/copy1
   printf '%s\n' "$3" > $d/copy0/coop.log; [ "$4" != "-" ] && printf '%s\n' "$4" > $d/copy1/coop.log
-  got=$(python3 -I "$P" $d 2 100 | tail -1)
+  got=$(COOP_ALLOW_RESYNC="${COOP_ALLOW_RESYNC:-}" python3 -I "$P" $d 2 100 | tail -1)
   if [ "$got" = "RESULT: $2" ]; then echo "ok   $1 -> $2"; else echo "BAD  $1: wanted $2, got $got"; fails=$((fails+1)); fi
 }
 END='[0.3 f100 e1] SUMMARY frames=100 desyncs=0 stalls=0 players=2 catchup=0 resyncs=0 reason=exit_after reached'
@@ -32,5 +32,18 @@ check epochs PASS "$E2" "$E2"
 check epoch_diverge FAIL "$E2" "[0.1 f30 e1] HASH all=aa rng=1 time=1
 [0.5 f30 e2] HASH all=cd rng=1 time=1
 $END"
-echo "SCORER pass=$((9 - fails)) fail=$fails"
+# Allowed resync: a desync in epoch 1 is fine when epoch 2 agrees; a mismatch in the last epoch still fails.
+R="[0.1 f30 e1] HASH all=aa rng=1 time=1
+[0.2 f60 e1] DESYNC frame=60 slot=1
+[0.5 f30 e2] HASH all=cc rng=1 time=1
+$END"
+COOP_ALLOW_RESYNC=1 check resync_ok PASS "$R" "[0.1 f30 e1] HASH all=ab rng=1 time=1
+[0.2 f60 e1] DESYNC frame=60 slot=1
+[0.5 f30 e2] HASH all=cc rng=1 time=1
+$END"
+COOP_ALLOW_RESYNC=1 check resync_last_epoch_diverges FAIL "$R" "[0.1 f30 e1] HASH all=aa rng=1 time=1
+[0.5 f30 e2] HASH all=cd rng=1 time=1
+$END"
+check resync_not_allowed FAIL "$R" "$R"
+echo "SCORER pass=$((12 - fails)) fail=$fails"
 [ $fails = 0 ]

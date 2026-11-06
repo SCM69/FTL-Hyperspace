@@ -108,6 +108,21 @@ void BeforeFrame(uint32_t frame)
         }
     }
 
+    // captain: the host opens the ship screen, upgrades shields like UpgradeBox::Accept does, closes the screen.
+    if (cfg.bot == "captain" && captain && CoopGame::GetSession()->Epoch() == 1)
+    {
+        ShipSystem* shields = nullptr;
+        for (ShipSystem* y : ship->vSystemList) if (y && y->iSystemType == 0) shields = y;
+        if (frame == 600) { gui->shipScreens.Open(); CoopGame::Log("BOT captain opens ship screen"); }
+        if (frame == 640 && shields) { shields->UpgradeSystem(1); ship->currentScrap -= 10; CoopGame::Log("BOT captain upgrades shields to " + std::to_string(shields->powerState.second)); }
+        if (frame == 700) { gui->shipScreens.Close(); CoopGame::Log("BOT captain closes ship screen"); }
+    }
+    if (cfg.bot == "captain" && !captain && frame == 650)
+    {
+        // A guest trying to buy: its click must be ignored.
+        gui->upgradeScreen.MouseClick(640, 360);
+    }
+
     bool fight = cfg.bot == "fight" || cfg.bot == "specials";
     bool specials = cfg.bot == "specials";
     // specials: the captain installs cloaking (10), battery (12), mind control (14), hacking (15) at the start (test

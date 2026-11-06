@@ -38,6 +38,7 @@ coop::Session* GetSession();
 int LocalSlot();
 void Log(const std::string& line);
 void RequestResync(const char* why);
+void RequestResyncSoon(const char* why);   // at the start of the next loop, outside any game code
 
 // Commands from the local player. Returns true when the action was taken over by co-op
 // (the caller must not perform it locally).

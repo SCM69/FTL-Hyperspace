@@ -40,7 +40,12 @@ for ((i=0; i<N; i++)); do
     export FTL_COOP_NAME="bot$i" FTL_COOP_PLAYERS=$PLAYERS FTL_COOP_MODE=$MODE FTL_COOP_SEED=$SEED FTL_COOP_BOT=$BOT
     export FTL_COOP_USERDIR="$C/user/" FTL_COOP_LOG="$C/coop.log" FTL_COOP_EXIT_AFTER=$FRAMES FTL_COOP_BUILD_ID=$BUILD_ID
     export HYPERSPACE_SKIP_BUG_REPORT=1 HYPERSPACE_FORCE_EXIT_ON_FREEZE=1 HYPERSPACE_NO_DIALOGS=1
-    if [ "$DISP" = headless ]; then
+    if [ -n "${FTL_COOP_GDB_COPY:-}" ] && [ "$FTL_COOP_GDB_COPY" = "$i" ]; then
+      # Debug: this copy runs under gdb; the timeout's SIGINT stops it and gdb prints every thread's stack.
+      exec timeout -k 10 -s INT "$TIMEOUT" gamescope --backend headless -W 1280 -H 720 -w 1280 -h 720 -- gdb -batch \
+        -ex "set startup-with-shell off" -ex "set env LD_PRELOAD=$SO" -ex "handle SIGPIPE nostop noprint" -ex run \
+        -ex "thread apply all bt 25" --args ./FTL.amd64 > "$C/stdout.log" 2>&1
+    elif [ "$DISP" = headless ]; then
       exec timeout -k 5 "$TIMEOUT" gamescope --backend headless -W 1280 -H 720 -w 1280 -h 720 -- env LD_PRELOAD="$SO" ./FTL.amd64 > "$C/stdout.log" 2>&1
     else
       exec timeout -k 5 "$TIMEOUT" env LD_PRELOAD="$SO" ./FTL.amd64 > "$C/stdout.log" 2>&1

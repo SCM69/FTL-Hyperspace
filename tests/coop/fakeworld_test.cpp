@@ -265,6 +265,35 @@ int main()
         CHECK(reached && epochs && c[0].s->DesyncCount() == 0 && c[0].s->PlayerCount() == 3, msg);
     }
 
+    // 9. Re-entrancy: the host restarts the session from inside OnDesync (what auto-resync does). Must not crash,
+    //    and the copies must agree again after the restart.
+    {
+        struct ResyncWorld : ToyWorld { Session* s = nullptr; int restarts = 0;
+            void OnDesync(uint32_t f, int sl, uint64_t a, uint64_t b) override {
+                ToyWorld::OnDesync(f, sl, a, b);
+                if (s && s->IsHost() && restarts < 3) { ++restarts; Writer r; r.u64(rng); r.u8(0); r.u8(2);
+                    for (auto v : pos) r.u32((uint32_t)v); for (auto v : goal) r.u32((uint32_t)v); r.u32((uint32_t)paused); s->Restart(r.b); } } };
+        Settings st; st.buildId = "test"; st.delay = 3; st.window = 10; st.hashEvery = 5;
+        TcpTransport ht, gt; ResyncWorld hw; ToyWorld gw; std::string err;
+        ht.Listen(0, &err);
+        Session hs(&ht, &hw, st, true, "h"), gs(&gt, &gw, st, false, "g");
+        hw.s = &hs;
+        gt.Connect("127.0.0.1", ht.ListenPort(), &err);
+        for (int i = 0; i < 300; ++i) { hs.Poll(); gs.Poll(); }
+        Writer b; b.u64(5); b.u8(0); b.u8(2); for (int k = 0; k < 17; ++k) b.u32(0);
+        hs.Start(b.b);
+        gw.mutateApplyTwice = true; // the guest drifts as soon as a command arrives
+        for (int it = 0; it < 20000 && (hs.Frame() < 200 || gs.Frame() < 200); ++it)
+        {
+            hs.Poll(); gs.Poll();
+            if (hs.Started() && it % 7 == 0) { Bytes m; m.push_back('M'); m.push_back((uint8_t)(it % 8)); m.push_back(1); hs.Submit(m); }
+            if (it == 3000) gw.mutateApplyTwice = false; // after a few restarts the guest behaves
+            if (hs.BeginFrame()) { hw.Step(); hs.EndFrame(); }
+            if (gs.BeginFrame()) { gw.Step(); gs.EndFrame(); }
+        }
+        CHECK(hw.restarts > 0 && hs.Epoch() == gs.Epoch() && hs.Frame() >= 200, "restart from inside OnDesync: no crash, copies continue in the same epoch");
+    }
+
     printf(g_fail ? "RESULT: FAIL (%d)\n" : "RESULT: PASS\n", g_fail);
     return g_fail ? 1 : 0;
 }

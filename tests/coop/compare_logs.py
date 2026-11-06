@@ -39,6 +39,9 @@ def parse(path):
 
 def main():
     out, n, frames = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    # COOP_ALLOW_RESYNC=1: desyncs before the last resync are expected (e.g. the captain editing the ship);
+    # only the last epoch is judged, and every copy must be in it.
+    allow_resync = os.environ.get("COOP_ALLOW_RESYNC") == "1"
     logs = [parse(os.path.join(out, f"copy{i}", "coop.log")) for i in range(n)]
     ok = True
     for i, lg in enumerate(logs):
@@ -53,12 +56,16 @@ def main():
         if not s or "exit_after reached" not in lg.get("summary_line", ""):
             ok = False
             print(f"  copy{i} did not reach frame {frames}")
-        if lg["desync"]:
+        if lg["desync"] and not allow_resync:
             ok = False
     if not all(logs):
         print("RESULT: FAIL")
         return 1
     common = sorted(set.intersection(*(set(lg["hashes"]) for lg in logs)))
+    if allow_resync and common:
+        last = max(k[0] for k in common)
+        common = [k for k in common if k[0] == last]
+        print(f"judging only the last epoch ({last})")
     first_bad = None
     for f in common:
         vals = [lg["hashes"][f]["all"] for lg in logs]
