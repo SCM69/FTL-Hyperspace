@@ -57,6 +57,14 @@ void BeforeFrame(uint32_t frame)
             open += std::string(n) + "#" + std::to_string(i) + " ";
         }
         CoopGame::Log("BOT open windows: " + open);
+        std::string wl;
+        if (ship->weaponSystem)
+            for (ProjectileFactory* w : ship->weaponSystem->weapons)
+                if (w) { char b3[96]; snprintf(b3, sizeof(b3), "[%s pow=%d cd=%.1f/%.1f tg=%d id=%d auto=%d] ", w->blueprint ? w->blueprint->name.c_str() : "?",
+                                  (int)w->powered, w->cooldown.first, w->cooldown.second, (int)w->targets.size(), w->targetId, (int)w->autoFiring); wl += b3; }
+        ShipManager* en2 = G_->GetShipManager(1);
+        if (en2 && en2->shieldSystem) wl += "enemyShields=" + std::to_string(en2->shieldSystem->shields.power.first);
+        CoopGame::Log("BOT weapons " + wl);
     }
 
     // Both bots: the captain clears event dialogs so the run keeps going.
@@ -68,7 +76,9 @@ void BeforeFrame(uint32_t frame)
     }
 
     // Captain: jump to a random neighbouring beacon when the FTL drive is charged and nothing else is going on.
-    if (captain && frame % 60 == 30 && !gui->choiceBox.bOpen && !G_->GetShipManager(1) && !ship->bJumping &&
+    ShipManager* foe = G_->GetShipManager(1);
+    bool foeGone = !foe || foe->bDestroyed || foe->ship.hullIntegrity.first <= 0;
+    if (captain && frame % 60 == 30 && !gui->choiceBox.bOpen && foeGone && !ship->bJumping &&
         (ship->lastJumpReady || ship->jump_timer.first >= ship->jump_timer.second) && ship->fuel_count > 0)
     {
         StarMap& map = G_->GetWorld()->starMap;
@@ -80,7 +90,39 @@ void BeforeFrame(uint32_t frame)
         }
     }
 
-    if (cfg.bot != "chaos") return;
+    // keys: press real hotkeys through CApp::OnKeyDown, the path a player's keyboard takes. Every action must be
+    // taken over by co-op; anything that changes only this copy shows up as a desync.
+    if (cfg.bot == "keys" && frame >= 60 && Rand(40) == 0)
+    {
+        static const char* names[] = { "weapon1", "weapon2", "weapon3", "shields", "engines", "oxygen", "medbay",
+                                       "un_shields", "un_engines", "un_oxygen", "un_medbay", "un_weapons",
+                                       "open_doors", "close_doors", "autofire", "pause" };
+        const char* n = names[Rand((int)(sizeof(names) / sizeof(names[0])))];
+        SDLKey key = (std::string(n) == "pause") ? SDLK_SPACE : Settings::GetHotkey(n);
+        if (key)
+        {
+            CoopGame::Log(std::string("BOT key ") + n + " = " + std::to_string((int)key));
+            G_->GetCApp()->OnKeyDown(key);
+            G_->GetCApp()->OnKeyUp(key);
+        }
+    }
+
+    bool fight = cfg.bot == "fight";
+    if (cfg.bot != "chaos" && !fight) return;
+
+    // fight: keep the weapons system and every weapon powered (one command per second at most).
+    if (fight && frame % 60 == (unsigned)(10 + 7 * CoopGame::LocalSlot()) % 60 && ship->weaponSystem)
+    {
+        ShipSystem* ws = (ShipSystem*)ship->weaponSystem;
+        bool sent = false;
+        for (size_t i = 0; i < ship->weaponSystem->weapons.size() && !sent; ++i)
+            if (ship->weaponSystem->weapons[i] && !ship->weaponSystem->weapons[i]->powered)
+            {
+                if (ws->powerState.first < ws->powerState.second) CoopGame::SubmitLocal(CoopCommands::Power(0, 3, 1, false));
+                else CoopGame::SubmitLocal(CoopCommands::WeaponPower((int)i, true));
+                sent = true;
+            }
+    }
 
     // Fight: fire a random weapon at a random enemy room now and then.
     ShipManager* enemy = G_->GetShipManager(1);
@@ -121,7 +163,7 @@ void BeforeFrame(uint32_t frame)
         ShipSystem* s = ship->vSystemList[Rand((int)ship->vSystemList.size())];
         if (!s) break;
         int delta = Rand(2) ? 1 : -1;
-        if (delta < 0 && (s->iSystemType == 1 || s->iSystemType == 6)) delta = 1; // keep engines and piloting up
+        if (delta < 0 && (s->iSystemType == 1 || s->iSystemType == 6 || (fight && s->iSystemType == 3))) delta = 1; // keep engines and piloting up
         CoopGame::SubmitLocal(CoopCommands::Power(0, s->iSystemType, delta, false));
         break;
     }
@@ -134,7 +176,7 @@ void BeforeFrame(uint32_t frame)
     case 7: case 8:
     {
         if (ship->weaponSystem && !ship->weaponSystem->weapons.empty())
-            CoopGame::SubmitLocal(CoopCommands::WeaponPower(Rand((int)ship->weaponSystem->weapons.size()), Rand(2) != 0));
+            CoopGame::SubmitLocal(CoopCommands::WeaponPower(Rand((int)ship->weaponSystem->weapons.size()), fight || Rand(2) != 0));
         break;
     }
     case 9:

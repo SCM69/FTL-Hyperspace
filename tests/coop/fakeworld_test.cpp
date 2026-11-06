@@ -72,7 +72,10 @@ struct ToyWorld : Adapter
     }
     void OnStart(const Bytes& blob) override
     {
+        // A start (or restart from a save) puts every copy in the same state.
         Reader r(blob); rng = r.u64(); mode = r.u8(); players = r.u8();
+        for (auto& v : pos) v = (int32_t)(r.u32()); for (auto& v : goal) v = (int32_t)(r.u32()); paused = (int32_t)r.u32();
+        if (r.bad) { for (auto& v : pos) v = 0; for (auto& v : goal) v = 0; paused = 0; }
     }
     void OnDesync(uint32_t, int, uint64_t, uint64_t) override { ++desyncSeen; }
     void OnReject(const std::string&) override { ++rejectsReceived; }
@@ -119,6 +122,7 @@ static Result RunScenario(int nPlayers, int mode, uint32_t frames, unsigned seed
         if (all) break;
     }
     Writer blob; blob.u64(0xC0FFEEULL + seed); blob.u8((uint8_t)mode); blob.u8((uint8_t)nPlayers);
+    for (int k = 0; k < 17; ++k) blob.u32(0);
     copies[0].s->Start(blob.b);
 
     // Run: every iteration, each copy is polled; a random subset is "slow" and skips its frame.
@@ -202,6 +206,63 @@ int main()
         g1.Connect("127.0.0.1", ht.ListenPort(), &err);
         for (int i = 0; i < 200; ++i) { hs.Poll(); s1.Poll(); }
         CHECK(hs.PlayerCount() == 1 && w1.rejectsReceived == 1, "guest with a different mod build is refused");
+    }
+
+    // 7. Restart mid-run from the host's state (what a resync from a save does), with traffic in flight.
+    // 8. Late join: a third player connects to a running game; the host restarts everyone from its state.
+    for (int scenario = 7; scenario <= 8; ++scenario)
+    {
+        Settings st; st.buildId = "test"; st.delay = 3; st.window = 10; st.hashEvery = 1;
+        std::vector<Copy> c(3);
+        std::string err;
+        for (int i = 0; i < 3; ++i) { c[i].t.reset(new TcpTransport()); c[i].w.reset(new ToyWorld()); c[i].w->tag = "r" + std::to_string(i);
+            c[i].s.reset(new Session(c[i].t.get(), c[i].w.get(), st, i == 0, "p" + std::to_string(i))); }
+        c[0].t->Listen(0, &err); c[0].s->SetAllowLateJoin(true);
+        int port = c[0].t->ListenPort();
+        int initial = scenario == 7 ? 3 : 2;
+        for (int i = 1; i < initial; ++i) c[i].t->Connect("127.0.0.1", port, &err);
+        for (int it = 0; it < 300; ++it) for (int i = 0; i < initial; ++i) c[i].s->Poll();
+        Writer b; b.u64(77); b.u8(0); b.u8(3); for (int k = 0; k < 17; ++k) b.u32(0);
+        c[0].s->Start(b.b);
+        auto run = [&](int n, uint32_t until) {
+            for (int it = 0; it < (int)until * 30; ++it)
+            {
+                bool done = true;
+                for (int i = 0; i < n; ++i)
+                {
+                    c[i].s->Poll();
+                    if (c[i].s->Frame() >= until) continue;
+                    done = false;
+                    if (rand() % 4 == 0) continue;
+                    if (c[i].s->Started() && rand() % 5 == 0) { Bytes m; m.push_back('M'); m.push_back((uint8_t)(rand() % 8)); m.push_back(1); c[i].s->Submit(m); }
+                    if (c[i].s->BeginFrame()) { c[i].w->Step(); c[i].s->EndFrame(); }
+                }
+                if (done) break;
+            }
+        };
+        run(initial, 200);
+        if (scenario == 8)
+        {
+            c[2].t->Connect("127.0.0.1", port, &err);
+            for (int it = 0; it < 300; ++it) for (int i = 0; i < 3; ++i) c[i].s->Poll();
+        }
+        // Guests finish the frames they already have (their DONE messages, with hashes, are now in flight)
+        // while the host is not polling; then the host restarts. Without epochs these stale hashes would be
+        // compared against the new run's frames of the same number.
+        for (int i = 1; i < 3; ++i)
+            for (int k = 0; k < 6; ++k) { c[i].s->Poll(); if (c[i].s->BeginFrame()) { c[i].w->Step(); c[i].s->EndFrame(); } }
+        // Host state -> blob ("save"), restart everyone from it.
+        Writer r; r.u64(c[0].w->rng); r.u8(0); r.u8(3);
+        for (auto v : c[0].w->pos) r.u32((uint32_t)v); for (auto v : c[0].w->goal) r.u32((uint32_t)v); r.u32((uint32_t)c[0].w->paused);
+        c[0].s->Restart(r.b);
+        run(3, 300);
+        for (int it = 0; it < 200; ++it) for (int i = 0; i < 3; ++i) c[i].s->Poll();
+        bool reached = c[0].s->Frame() >= 300 && c[1].s->Frame() >= 300 && c[2].s->Frame() >= 300;
+        bool epochs = c[1].s->Epoch() == c[0].s->Epoch() && c[2].s->Epoch() == c[0].s->Epoch() && c[0].s->Epoch() == 2;
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s: all 3 reached frame 300 after restart (epoch %u), no desync (%u)",
+                 scenario == 7 ? "restart mid-run" : "late join + restart", c[0].s->Epoch(), c[0].s->DesyncCount());
+        CHECK(reached && epochs && c[0].s->DesyncCount() == 0 && c[0].s->PlayerCount() == 3, msg);
     }
 
     printf(g_fail ? "RESULT: FAIL (%d)\n" : "RESULT: PASS\n", g_fail);

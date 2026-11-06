@@ -554,3 +554,14 @@ HOOK_METHOD_PRIORITY(ParticleEmitter, OnUpdate, 9000, () -> void)
     super();
     CoopRng::SetSil(s);
 }
+
+// Background nebula clouds draw random32 in SpaceManager::OnLoopNebulas a varying number of times (seen with the
+// fight bot, seed 32, 2026-11-06). The clouds are visual; a nebula's gameplay effect comes from the location.
+HOOK_METHOD_PRIORITY(SpaceManager, OnLoopNebulas, 9000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> SpaceManager::OnLoopNebulas -> Begin (CoopGame.cpp)\n")
+    if (!CoopGame::InLockstep()) { super(); return; }
+    uint64_t s = CoopRng::GetSil();
+    super();
+    CoopRng::SetSil(s);
+}

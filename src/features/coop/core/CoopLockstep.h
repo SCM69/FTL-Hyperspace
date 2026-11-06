@@ -31,7 +31,7 @@ enum MsgType : uint8_t
     MSG_CHAT = 9,    // either way: text (also used for status lines)
 };
 
-static const uint32_t PROTOCOL_VERSION = 1;
+static const uint32_t PROTOCOL_VERSION = 2;
 
 struct Command
 {
@@ -76,12 +76,17 @@ public:
     int Slot() const { return m_slot; }               // host is slot 0; -1 until welcomed
     bool Started() const { return m_started; }
     uint32_t Frame() const { return m_frame; }        // next frame to run
+    uint32_t Epoch() const { return m_epoch; }
     int PlayerCount() const;
     std::vector<int> Slots() const;
     std::string PlayerName(int slot) const;
 
     // Host: begin lockstep for everyone with this blob (seed, mode, save file...).
     void Start(const Bytes& startBlob);
+    // Host: start over from frame 0 for everyone with a new blob (resync from a save, after a late join).
+    void Restart(const Bytes& startBlob);
+    // Host: let players join while a game runs (the game then restarts everyone from a save).
+    void SetAllowLateJoin(bool on) { m_allowLateJoin = on; }
     // Queue a local command (sent to host, or queued directly on the host).
     void Submit(const Bytes& cmd);
     // Poll the network. Call every game loop iteration.
@@ -125,6 +130,9 @@ private:
     std::map<uint32_t, std::map<int, uint64_t>> m_hashes; // host: frame -> slot -> hash
     uint32_t m_stalls;
     uint32_t m_desyncs;
+    bool m_allowLateJoin = false;
+    uint32_t m_epoch = 0;          // increases with every Start/Restart; stale messages are dropped
+    void ResetFrames();
 };
 
 // FNV-1a 64 helpers for building state hashes.

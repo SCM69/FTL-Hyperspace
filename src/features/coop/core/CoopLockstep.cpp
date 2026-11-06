@@ -78,10 +78,29 @@ void Session::Start(const Bytes& startBlob)
     // Frames 0..delay-1 have no commands (nobody could have sent any for them).
     for (uint32_t f = 0; f < m_s.delay; ++f) m_bundles[f];
     m_scheduledUpTo = m_s.delay;
-    Writer w; w.u8(MSG_START); w.u32(m_s.delay); w.bytes(startBlob);
+    ++m_epoch;
+    Writer w; w.u8(MSG_START); w.u32(m_epoch); w.u32(m_s.delay); w.bytes(startBlob);
     for (auto& kv : m_peers) if (kv.second.welcomed) m_t->Send(kv.first, w.b);
     Log("lockstep started with " + std::to_string(PlayerCount()) + " players");
     if (m_adapter) m_adapter->OnStart(startBlob);
+}
+
+void Session::ResetFrames()
+{
+    m_frame = 0;
+    m_bundles.clear();
+    m_pending.clear();
+    m_hashes.clear();
+    for (auto& kv : m_peers) { kv.second.doneFrame = 0; kv.second.hasDone = false; }
+}
+
+void Session::Restart(const Bytes& startBlob)
+{
+    if (!m_isHost) return;
+    m_started = false;
+    ResetFrames();
+    m_scheduledUpTo = 0;
+    Start(startBlob);
 }
 
 void Session::Submit(const Bytes& cmd)
@@ -89,7 +108,7 @@ void Session::Submit(const Bytes& cmd)
     if (m_isHost) HostAcceptCommand(0, cmd);
     else
     {
-        Writer w; w.u8(MSG_CMD); w.bytes(cmd);
+        Writer w; w.u8(MSG_CMD); w.u32(m_epoch); w.bytes(cmd);
         m_t->Send(0, w.b);
     }
 }
@@ -166,7 +185,7 @@ void Session::EndFrame()
     }
     else
     {
-        Writer w; w.u8(MSG_DONE); w.u32(f); w.u8(hashFrame ? 1 : 0); if (hashFrame) w.u64(h);
+        Writer w; w.u8(MSG_DONE); w.u32(m_epoch); w.u32(f); w.u8(hashFrame ? 1 : 0); if (hashFrame) w.u64(h);
         m_t->Send(0, w.b);
     }
     ++m_frame;
@@ -218,7 +237,7 @@ void Session::OnMessage(int peer, const Bytes& msg)
             if (ver != PROTOCOL_VERSION) refuse = "protocol version differs";
             else if (build != m_s.buildId) refuse = "mod build differs: host " + m_s.buildId + ", you " + build;
             else if (PlayerCount() >= m_s.maxPlayers) refuse = "session is full";
-            else if (m_started) refuse = "game already started (late join not supported yet)";
+            else if (m_started && !m_allowLateJoin) refuse = "game already started";
             if (!refuse.empty())
             {
                 Writer w; w.u8(MSG_REJECT); w.str(refuse);
@@ -244,12 +263,15 @@ void Session::OnMessage(int peer, const Bytes& msg)
         else if (!p.welcomed) return;
         else if (type == MSG_CMD)
         {
+            uint32_t epoch = r.u32();
             Bytes cmd = r.bytes();
-            if (!r.bad && m_started) HostAcceptCommand(p.slot, cmd);
+            if (!r.bad && m_started && epoch == m_epoch) HostAcceptCommand(p.slot, cmd);
         }
         else if (type == MSG_DONE)
         {
+            uint32_t epoch = r.u32();
             uint32_t f = r.u32(); uint8_t hasHash = r.u8();
+            if (epoch != m_epoch) return; // from before a restart
             if (!p.hasDone || f > p.doneFrame) { p.doneFrame = f; p.hasDone = true; }
             if (hasHash) { m_hashes[f][p.slot] = r.u64(); HostCompare(f); }
         }
@@ -273,9 +295,11 @@ void Session::OnMessage(int peer, const Bytes& msg)
         }
         else if (type == MSG_START)
         {
+            m_epoch = r.u32();
             uint32_t delay = r.u32();
             Bytes blob = r.bytes();
-            m_started = true; m_frame = 0;
+            ResetFrames();
+            m_started = true;
             // Frames before the first scheduled bundle carry no commands (the host never sends them).
             for (uint32_t f = 0; f < delay; ++f) m_bundles[f];
             Log("lockstep started");
