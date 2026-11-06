@@ -427,8 +427,8 @@ static void InitSession()
     if (!ok)
     {
         Log("ERROR: network: " + err);
-        CoopCommands::ShowMessage("Co-op network error: " + err);
-        return;
+        CoopCommands::ShowMessage("Co-op network error: " + err + (c.host ? "" : " (retrying)"));
+        if (c.host) return;
     }
     Logf("co-op %s ready: %s:%d name=%s mode=%s bot=%s build=%s", c.host ? "host" : "guest", c.addr.c_str(), c.port,
          c.name.c_str(), c.mode == Mode::OwnCrew ? "owncrew" : "ffa", c.bot.c_str(), s.buildId.c_str());
@@ -604,6 +604,19 @@ int BeforeLoop()
     static bool inited = false;
     if (!inited) { inited = true; CoopRng::MarkMainThread(); InitSession(); }
     if (!Active() || !g_session) return 1;
+    // Guest: (re)connect every 3 seconds until the host answers (it may start later than we do).
+    if (!GetConfig().host && !g_transport->Connected() && !g_session->Started())
+    {
+        static double nextTry = 0;
+        double now = (double)time(nullptr);
+        if (now >= nextTry)
+        {
+            nextTry = now + 3;
+            std::string err;
+            if (g_transport->Connect(GetConfig().addr, GetConfig().port, &err)) Log("connected to the host");
+            else { static int tries = 0; if (tries++ % 10 == 0) Log("waiting for the host at " + GetConfig().addr + ": " + err); }
+        }
+    }
     g_session->Poll();
     if (!g_pendingResync.empty() && g_inLockstep) { std::string why = g_pendingResync; g_pendingResync.clear(); RequestResync(why.c_str()); }
     static int loops = 0;

@@ -38,6 +38,7 @@ public:
     void Send(int peer, const Bytes& msg) override;
     void Close(int peer) override;
     int ListenPort() const { return m_port; }
+    bool Connected() const { for (auto& c : m_conns) if (!c.dead) return true; return false; }
 
     // Tests: hold every outgoing message this long before it goes on the wire (one-way latency).
     void SetTestLatencyMs(int ms) { m_latencyMs = ms; }

@@ -8,6 +8,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 namespace coop {
@@ -64,7 +65,9 @@ bool TcpTransport::Connect(const std::string& host, int port, std::string* err)
         return false;
     }
     int fd = ::socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    // Blocking connect keeps this simple; it happens once, before the game starts.
+    // Blocking connect with a short timeout (Linux honours SO_SNDTIMEO for connect): an unreachable host must not
+    // freeze the game; the caller retries.
+    if (fd >= 0) { timeval tv; tv.tv_sec = 2; tv.tv_usec = 0; setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)); }
     int rc = fd >= 0 ? ::connect(fd, res->ai_addr, res->ai_addrlen) : -1;
     freeaddrinfo(res);
     if (rc != 0)
