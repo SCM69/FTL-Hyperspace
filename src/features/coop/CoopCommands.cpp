@@ -636,6 +636,12 @@ HOOK_METHOD_PRIORITY(StarMap, MouseClick, 9000, (int mX, int mY) -> void)
 {
     LOG_HOOK("HOOK_METHOD_PRIORITY -> StarMap::MouseClick -> Begin (CoopCommands.cpp)\n")
     bool takeOver = ShouldTakeOver();
+    // The next sector is the captain's choice (not a command yet: the host's choice reaches the others by a resync).
+    if (takeOver && this->bChoosingNewSector && CoopGame::GetSession() && !CoopGame::GetSession()->IsHost())
+    {
+        ShowMessage("The captain (host) chooses the next sector");
+        return;
+    }
     bool wasReady = this->readyToTravel;
     super(mX, mY);
     if (takeOver && !wasReady && this->readyToTravel && this->potentialLoc)
