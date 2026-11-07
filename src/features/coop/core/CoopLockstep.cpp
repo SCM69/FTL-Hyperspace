@@ -79,12 +79,13 @@ void Session::OnConnect(int peer)
 {
     if (m_isHost)
     {
-        Peer p; p.peerId = peer; p.slot = -1; p.welcomed = false; p.doneFrame = 0; p.hasDone = false;
+        Peer p; p.peerId = peer; p.slot = -1; p.welcomed = false; p.doneFrame = 0; p.hasDone = false; p.heardMs = ClockMs();
         m_peers[peer] = p;
         Log("peer " + std::to_string(peer) + " connected");
     }
     else
     {
+        m_hostHeardMs = ClockMs();
         Writer w; w.u8(MSG_HELLO); w.u32(PROTOCOL_VERSION); w.str(m_s.buildId); w.str(m_name);
         m_t->Send(0, w.b);
     }
@@ -111,6 +112,8 @@ void Session::OnDisconnect(int peer)
     }
     else
     {
+        if (m_hostHeardMs == 0) return;   // already reported (timeout first, then the transport)
+        m_hostHeardMs = 0;
         Log("host connection lost");
         if (m_adapter) m_adapter->OnPlayerLeft(0);
     }
@@ -208,6 +211,38 @@ void Session::Poll()
             for (auto& kv : m_peers) if (kv.second.welcomed) m_t->Send(kv.first, w.b);
         }
     }
+    CheckTimeouts();
+}
+
+// A player whose game froze or lost its network says nothing; the transport may not notice for a long time (Steam
+// keeps them in the lobby, TCP keeps the socket). The host pings twice a second and every guest answers, so silence
+// longer than timeoutMs means they are gone: the host drops the guest and plays on; a guest treats the host as gone.
+void Session::CheckTimeouts()
+{
+    if (!m_s.timeoutMs) return;
+    double now = ClockMs();
+    if (m_isHost)
+    {
+        std::vector<int> silent;
+        for (auto& kv : m_peers) if (now - kv.second.heardMs > m_s.timeoutMs) silent.push_back(kv.first);
+        for (int peer : silent)
+        {
+            auto it = m_peers.find(peer);
+            if (it == m_peers.end()) continue;
+            Log("slot " + std::to_string(it->second.slot) + " silent for " + std::to_string((int)((now - it->second.heardMs) / 1000)) +
+                " s: dropped");
+            ++m_timeoutDrops;
+            m_t->Close(peer);
+            OnDisconnect(peer);   // no-op if the transport already reported it
+        }
+    }
+    else if (m_hostHeardMs > 0 && now - m_hostHeardMs > m_s.timeoutMs)
+    {
+        Log("host silent for " + std::to_string((int)((now - m_hostHeardMs) / 1000)) + " s");
+        ++m_timeoutDrops;
+        m_t->Close(0);
+        if (m_hostHeardMs > 0) OnDisconnect(0);
+    }
 }
 
 bool Session::BeginFrame()
@@ -295,6 +330,7 @@ void Session::OnMessage(int peer, const Bytes& msg)
         auto pit = m_peers.find(peer);
         if (pit == m_peers.end()) return;
         Peer& p = pit->second;
+        p.heardMs = ClockMs();
         if (type == MSG_HELLO)
         {
             uint32_t ver = r.u32(); std::string build = r.str(); std::string name = r.str();
@@ -360,6 +396,7 @@ void Session::OnMessage(int peer, const Bytes& msg)
     }
     else
     {
+        if (m_hostHeardMs > 0) m_hostHeardMs = ClockMs();
         if (type == MSG_WELCOME)
         {
             m_slot = r.u8();

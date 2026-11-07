@@ -117,6 +117,7 @@ const Config& GetConfig()
     g_cfg.delay = (uint32_t)atoi(get("FTL_COOP_DELAY", "delay", "4").c_str());
     g_cfg.window = (uint32_t)atoi(get("FTL_COOP_WINDOW", "window", "12").c_str());
     g_cfg.hashEvery = (uint32_t)atoi(get("FTL_COOP_HASH_EVERY", "hash_every", "30").c_str());
+    g_cfg.timeoutSec = (uint32_t)atoi(get("FTL_COOP_TIMEOUT", "timeout", "20").c_str());
     g_cfg.autoResync = get("FTL_COOP_AUTO_RESYNC", "auto_resync", "1") == "1";
     g_cfg.startContinue = get("FTL_COOP_START", "start", "new") == "continue";
     g_cfg.testResyncAt = (uint32_t)strtoul(get("FTL_COOP_TEST_RESYNC_AT", "test_resync_at", "0").c_str(), nullptr, 10);
@@ -476,7 +477,7 @@ static void InitSession()
     Logf("layout check: ShipManager jump_timer=%zu (DWARF 1544) fuel_count=%zu (1552) bJumping=%zu (1652) lastJumpReady=%zu (2257)",
          offsetof(ShipManager, jump_timer), offsetof(ShipManager, fuel_count), offsetof(ShipManager, bJumping), offsetof(ShipManager, lastJumpReady));
     coop::Settings s;
-    s.delay = c.delay; s.window = c.window; s.hashEvery = c.hashEvery; s.maxPlayers = 8;
+    s.delay = c.delay; s.window = c.window; s.hashEvery = c.hashEvery; s.maxPlayers = 8; s.timeoutMs = c.timeoutSec * 1000;
     // Windows and Linux FTL are different programs (different code, floating point and rand), so they cannot share a
     // lockstep game: the platform is part of the build id, and the host refuses a player whose id differs.
 #ifdef _WIN32
@@ -824,6 +825,30 @@ using namespace CoopGame;
 HOOK_METHOD_PRIORITY(CApp, OnLoop, -1000, () -> void)
 {
     LOG_HOOK("HOOK_METHOD_PRIORITY -> CApp::OnLoop -> Begin (CoopGame.cpp)\n")
+    // Test switch: FTL_COOP_TEST_FREEZE=<name>:<loop>:<seconds> freezes the copy with that player name at that loop
+    // (the whole game stops, like a hung window), to test the silence timeout.
+    {
+        static int freezeLoop = -1, freezeSec = 0, loops = 0;
+        static bool parsed = false;
+        if (!parsed)
+        {
+            parsed = true;
+            const char* e = getenv("FTL_COOP_TEST_FREEZE");
+            std::string v = e ? e : "", name = v.substr(0, v.find(':'));
+            if (!v.empty() && name == CoopGame::GetConfig().name && sscanf(v.c_str() + name.size(), ":%d:%d", &freezeLoop, &freezeSec) != 2) freezeLoop = -1;
+            if (name != CoopGame::GetConfig().name) freezeLoop = -1;
+        }
+        if (freezeLoop >= 0 && ++loops == freezeLoop)
+        {
+            CoopGame::Logf("test: freezing for %d s", freezeSec);
+#ifdef _WIN32
+            Sleep(freezeSec * 1000);
+#else
+            sleep(freezeSec);
+#endif
+            CoopGame::Log("test: awake");
+        }
+    }
     int n = BeforeLoop();
     if (n >= 0) { super(); return; }
     // Test switch: a guest skips K loops out of every 97 (a hitch), so it falls behind and must catch up.

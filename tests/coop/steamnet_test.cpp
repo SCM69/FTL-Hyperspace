@@ -17,6 +17,7 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <unistd.h>
 
 using namespace coop;
 
@@ -184,7 +185,7 @@ static Player* MakePlayer(FakeWorld& fw, uint64_t id, const std::string& name, b
     p->t->SetNow(FakeNow);
     p->t->onLog = [p, name](const std::string& s) { p->log.push_back(s); if (getenv("COOP_TEST_VERBOSE")) printf("[%s net] %s\n", name.c_str(), s.c_str()); };
     p->w.reset(new ToyWorld()); p->w->tag = name;
-    Settings st; st.buildId = build; st.delay = 3; st.window = 10; st.hashEvery = 10;
+    Settings st; st.buildId = build; st.delay = 3; st.window = 10; st.hashEvery = 10; st.timeoutMs = 1000;
     p->s.reset(new Session(p->t.get(), p->w.get(), st, host, name));
     p->s->SetAllowLateJoin(true);
     return p;
@@ -327,6 +328,34 @@ int main()
         PollAll(fw, ps, 200);
         CHECK(lobby && ps[1]->s->Slot() == 1, "joining by lobby id works without the friends list");
         CHECK(ps[2]->s->Slot() == -1 && LogHas(*ps[2], "joining failed"), "a full lobby: the extra guest keeps waiting (join fails, retried)");
+    }
+
+    // 5. A guest's game freezes but Steam keeps it in the lobby: the host drops it after the timeout and does not take it
+    //    back while it stays; after it leaves and joins again, it is a player again.
+    {
+        FakeWorld fw;
+        std::vector<std::unique_ptr<Player>> ps;
+        ps.emplace_back(MakePlayer(fw, 5001, "Host", true, "B1")); ps[0]->t->Host(8, { { "build", "B1" } });
+        PollAll(fw, ps, 10);
+        for (int i = 1; i <= 2; ++i) { ps.emplace_back(MakePlayer(fw, 5001 + i, "G" + std::to_string(i), false, "B1")); ps[i]->t->Join(0, "", "B1"); }
+        PollAll(fw, ps, 100);
+        Settings st; (void)st;
+        ps[0]->s->Start(Blob(8, 0));
+        RunFrames(fw, ps, 100);
+        // Freeze G2 (never polled) for 1.5 s of real time with a 1 s timeout on the host.
+        std::unique_ptr<Player> frozen; frozen.swap(ps[2]);
+        for (int i = 0; i < 300; ++i) { ++fw.tick; g_clock += 0.005; for (auto& p : ps) if (p) p->s->Poll(); usleep(5000); }
+        bool dropped = ps[0]->s->TimeoutDrops() == 1 && ps[0]->s->PlayerCount() == 2;
+        CHECK(dropped, "Steam: a frozen guest still in the lobby is dropped after the timeout");
+        PollAll(fw, ps, 50);
+        CHECK(ps[0]->s->PlayerCount() == 2, "Steam: the dropped guest is not taken back while it stays in the lobby");
+        // It wakes up, notices the host's silence (its own timeout), leaves the lobby, and joins again as a new player.
+        frozen.swap(ps[2]);
+        for (int i = 0; i < 300 && ps[2]->w->left == 0; ++i) { PollAll(fw, ps, 1); usleep(5000); }
+        CHECK(ps[2]->w->left == 1 && LogHas(*ps[2], "left the host's lobby"), "Steam: the woken guest sees the host as gone and leaves the lobby");
+        ps[2]->t->Join(0, "", "B1");
+        PollAll(fw, ps, 200);
+        CHECK(ps[0]->s->PlayerCount() == 3 && ps[2]->s->Slot() > 0, "Steam: after leaving and joining again it is a player again");
     }
 
     printf(g_fail ? "RESULT: FAIL (%d)\n" : "RESULT: PASS\n", g_fail);

@@ -31,7 +31,7 @@ struct ToyWorld : Adapter
     int players = 1;
     bool mutateApplyTwice = false; // mutation twin: apply commands twice on this copy
     // Stats
-    int applied = 0, rejected = 0, desyncSeen = 0, rejectsReceived = 0;
+    int applied = 0, rejected = 0, desyncSeen = 0, rejectsReceived = 0, left = 0;
     std::string tag;
 
     ToyWorld() : pos(8, 0), goal(8, 0) {}
@@ -81,6 +81,7 @@ struct ToyWorld : Adapter
     }
     void OnDesync(uint32_t, int, uint64_t, uint64_t) override { ++desyncSeen; }
     void OnReject(const std::string&) override { ++rejectsReceived; }
+    void OnPlayerLeft(int) override { ++left; }
     void OnLog(const std::string& line) override { if (getenv("COOP_TEST_VERBOSE")) printf("[%s] %s\n", tag.c_str(), line.c_str()); }
 };
 
@@ -335,6 +336,42 @@ int main()
                  hs.RttMs(), hs.CurrentDelay(), hs.CurrentWindow(), secs, hs.DesyncCount());
         CHECK(hs.Frame() >= 600 && s1.Frame() >= 600 && s2.Frame() >= 600 && hs.DesyncCount() == 0 &&
               hs.CurrentDelay() >= 6 && hs.RttMs() >= 100 && secs < 14.0, msg);
+    }
+
+    // 11. Silence: a guest's game freezes (stops polling). With a 1 s timeout the host drops it and plays on with the
+    //     other guest; then the host freezes and the remaining guest notices on its own.
+    {
+        Settings st; st.buildId = "test"; st.delay = 3; st.window = 10; st.hashEvery = 15; st.timeoutMs = 1000;
+        TcpTransport ht, g1, g2; ToyWorld hw, w1, w2; std::string err;
+        ht.Listen(0, &err);
+        Session hs(&ht, &hw, st, true, "h"), s1(&g1, &w1, st, false, "a"), s2(&g2, &w2, st, false, "b");
+        g1.Connect("127.0.0.1", ht.ListenPort(), &err); g2.Connect("127.0.0.1", ht.ListenPort(), &err);
+        for (int i = 0; i < 300; ++i) { hs.Poll(); s1.Poll(); s2.Poll(); }
+        Writer b; b.u64(11); b.u8(0); b.u8(3); for (int k = 0; k < 17; ++k) b.u32(0);
+        hs.Start(b.b);
+        Session* ss[3] = { &hs, &s1, &s2 }; ToyWorld* ws[3] = { &hw, &w1, &w2 };
+        // 2.5 s of real time, 2 ms per loop; copy 2 is frozen from loop 100 on.
+        for (int loop = 0; loop < 1250; ++loop)
+        {
+            for (int i = 0; i < 3; ++i)
+            {
+                if (i == 2 && loop >= 100) continue;
+                ss[i]->Poll();
+                if (ss[i]->BeginFrame()) { ws[i]->Step(); ss[i]->EndFrame(); }
+            }
+            usleep(2000);
+        }
+        uint32_t f = hs.Frame();
+        char msg[200];
+        snprintf(msg, sizeof(msg), "frozen guest dropped after the timeout (drops %u, players %d); host and the other guest went on to frame %u",
+                 hs.TimeoutDrops(), hs.PlayerCount(), f);
+        CHECK(hs.TimeoutDrops() == 1 && hs.PlayerCount() == 2 && w2.left == 0 && f > 600 && s1.Frame() + 20 > f, msg);
+        // The frozen guest wakes up: the host closed its connection, so it sees the host gone.
+        for (int i = 0; i < 200; ++i) { s2.Poll(); usleep(1000); }
+        CHECK(w2.left == 1, "the frozen guest, once awake, sees the host gone");
+        // The host freezes: the remaining guest drops it by itself after the timeout.
+        for (int i = 0; i < 700; ++i) { s1.Poll(); usleep(2000); }
+        CHECK(s1.TimeoutDrops() == 1 && w1.left == 1, "a guest notices a frozen host after the timeout");
     }
 
     printf(g_fail ? "RESULT: FAIL (%d)\n" : "RESULT: PASS\n", g_fail);

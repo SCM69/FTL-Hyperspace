@@ -98,6 +98,7 @@ private:
     double m_nextSearch = 0, m_nextMembers = 0;
     std::vector<Conn> m_conns;
     std::map<uint64_t, Bytes> m_early;        // host: data from users not yet seen as members
+    std::set<uint64_t> m_closed;              // host: dropped by us; ignored until they leave the lobby
     int m_nextId = 1;
     std::string m_status;
     std::string m_lastSearchNote;

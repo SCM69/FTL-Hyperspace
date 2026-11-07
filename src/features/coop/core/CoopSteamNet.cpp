@@ -95,7 +95,16 @@ void SteamTransport::Close(int peer)
         if (m_conns[i].id == peer)
         {
             Flush(m_conns[i]);
+            if (m_isHost) m_closed.insert(m_conns[i].user);
             Drop(i);
+            if (!m_isHost && m_lobby)
+            {
+                m_api->LeaveLobby(m_lobby);
+                m_lobby = 0;
+                m_state = State::Idle;
+                m_status = "Steam: left the host's lobby";
+                Log(m_status);
+            }
             return;
         }
 }
@@ -124,9 +133,15 @@ void SteamTransport::SyncMembers()
         if (still) ++i;
         else { Log("Steam: " + m_api->Name(m_conns[i].user) + " left the lobby"); Drop(i); }
     }
+    for (auto it = m_closed.begin(); it != m_closed.end();)
+    {
+        bool still = false;
+        for (uint64_t m : members) if (m == *it) still = true;
+        if (still) ++it; else it = m_closed.erase(it);   // left: may join again as a new player
+    }
     for (uint64_t m : members)
     {
-        if (m == me || ByUser(m)) continue;
+        if (m == me || ByUser(m) || m_closed.count(m)) continue;
         m_api->Accept(m);
         Conn c; c.user = m; c.id = m_nextId++;
         m_conns.push_back(c);
@@ -251,7 +266,7 @@ void SteamTransport::Poll()
     while (m_api->Receive(&pkt, &from))
     {
         Conn* c = ByUser(from);
-        if (!c && m_isHost && m_state == State::Open)
+        if (!c && m_isHost && m_state == State::Open && !m_closed.count(from))
         {
             SyncMembers();   // they may have joined since the last look
             c = ByUser(from);

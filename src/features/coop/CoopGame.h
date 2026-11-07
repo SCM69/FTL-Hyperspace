@@ -28,6 +28,7 @@ struct Config
     int shipType = 0, shipVariant = 0;
     uint32_t exitAfterFrames = 0; // tests: quit after this many lockstep frames
     uint32_t delay = 4, window = 12, hashEvery = 30;
+    uint32_t timeoutSec = 20;     // drop a player silent this long (guest: the host); 0 = never
     bool autoResync = true;       // host reloads everyone from its save after a desync
     bool startContinue = false;   // host starts from its continue save instead of a new run
     uint32_t testResyncAt = 0;    // tests: host resyncs once at this lockstep frame

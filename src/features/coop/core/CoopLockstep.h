@@ -67,6 +67,7 @@ struct Settings
     uint32_t hashEvery = 30;  // frames between hash checks
     int maxPlayers = 8;       // including the host
     std::string buildId;      // guests with a different build are refused
+    uint32_t timeoutMs = 20000; // drop a player (guest: the host) silent this long; 0 = never. The host pings twice a second.
 };
 
 class Session
@@ -111,6 +112,7 @@ public:
     // Consecutive bundles already here, starting at Frame() (guests use it to catch up).
     uint32_t ReadyAhead() const { uint32_t n = 0; while (m_bundles.count(m_frame + n)) ++n; return n; }
     uint32_t DesyncCount() const { return m_desyncs; }
+    uint32_t TimeoutDrops() const { return m_timeoutDrops; }
     void SendChat(const std::string& text);
 
 private:
@@ -122,7 +124,7 @@ private:
     void HostCompare(uint32_t frame);
     void Log(const std::string& s) { if (m_adapter) m_adapter->OnLog(s); }
 
-    struct Peer { int peerId; int slot; std::string name; bool welcomed; uint32_t doneFrame; bool hasDone; };
+    struct Peer { int peerId; int slot; std::string name; bool welcomed; uint32_t doneFrame; bool hasDone; double heardMs; };
 
     Transport* m_t;
     Adapter* m_adapter;
@@ -140,11 +142,14 @@ private:
     std::map<uint32_t, std::map<int, uint64_t>> m_hashes; // host: frame -> slot -> hash
     uint32_t m_stalls;
     uint32_t m_desyncs;
+    uint32_t m_timeoutDrops = 0;
     bool m_allowLateJoin = false;
     uint32_t m_epoch = 0;          // increases with every Start/Restart; stale messages are dropped
     bool m_adaptive = true;
     double m_rttMs = 0;
     double m_lastPing = 0;
+    double m_hostHeardMs = 0;       // guest: last message from the host (0 = not connected)
+    void CheckTimeouts();
     std::map<int, double> m_peerRtt;         // host: slot -> smoothed round trip
     void Adapt();
     void ResetFrames();
