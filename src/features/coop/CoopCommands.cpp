@@ -1,6 +1,8 @@
 // FTL co-op: player commands. Local input is turned into commands; commands are applied on every copy.
 #include "CoopCommands.h"
 #include "Global.h"
+#include "CrewMember_Extend.h"
+#include "CrewBox_Extend.h"
 #include <map>
 #include <cstring>
 
@@ -167,7 +169,7 @@ bool Allowed(int slot, const Bytes& cmd, CoopGame::Mode mode, std::string* reaso
     uint8_t t = r.u8();
     switch (t)
     {
-    case C_TEST_ADD_SYSTEM:
+    case C_TEST_ADD_SYSTEM: case C_TEST_ADD_CREW:
         if (!getenv("FTL_COOP_TEST")) { *reason = "test command"; return false; }
         return slot == 0;
     case C_CHOICE: case C_ASSIGN_CREW: case C_SET_MODE: case C_JUMP: case C_SECTOR:
@@ -181,7 +183,7 @@ bool Allowed(int slot, const Bytes& cmd, CoopGame::Mode mode, std::string* reaso
 
     switch (t)
     {
-    case C_MOVE:
+    case C_MOVE: case C_CREW_POWER:
     {
         int mgr = r.u8(); int idx = r.u16();
         CrewMember* c = CrewAt(Ship(mgr), idx);
@@ -237,6 +239,8 @@ std::string Describe(const Bytes& cmd)
     case C_AUTOFIRE: snprintf(buf, sizeof(buf), "autofire %d", r.u8()); break;
     case C_JUMP: snprintf(buf, sizeof(buf), "jump to location %d", r.u16()); break;
     case C_SECTOR: snprintf(buf, sizeof(buf), "next sector %d", r.u8()); break;
+    case C_CREW_POWER: { int sh = r.u8(); int ci = r.u16(); snprintf(buf, sizeof(buf), "crew power ship%d crew%d power%d", sh, ci, r.u8()); break; }
+    case C_TEST_ADD_CREW: snprintf(buf, sizeof(buf), "test add crew %s", r.str().c_str()); break;
     case C_CLOAK: snprintf(buf, sizeof(buf), "cloak %d", r.u8()); break;
     case C_BATTERY: snprintf(buf, sizeof(buf), "battery %d", r.u8()); break;
     case C_HACK_PULSE: snprintf(buf, sizeof(buf), "hack pulse"); break;
@@ -376,6 +380,29 @@ void Apply(int slot, const Bytes& cmd)
         map.potentialLoc = &map.dummyNewSector;
         if (map.bOpen) map.Close();
         CoopGame::Logf("sector chosen: world level now %d, readyToTravel %d", map.worldLevel, (int)map.readyToTravel);
+        break;
+    }
+    case C_CREW_POWER:
+    {
+        // What CrewBox::MouseClick / the ability hotkey do (CustomCrew.cpp), with the same checks.
+        int ship = r.u8(); int idx = r.u16(); int p = r.u8();
+        CrewMember* c = CrewAt(Ship(ship), idx);
+        if (!c) break;
+        CrewMember_Extend* ex = CM_EX(c);
+        if (p >= (int)ex->crewPowers.size()) break;
+        ActivatedPower* power = ex->crewPowers[p];
+        bool ready = power->enabled && power->PowerReady() == PowerReadyState::POWER_READY && c->GetPowerOwner() == 0;
+        if (ready) power->PreparePower();
+        CoopGame::Logf("crew power: %s power %d %s", c->species.c_str(), p, ready ? "activated" : "not ready (ignored)");
+        break;
+    }
+    case C_TEST_ADD_CREW:
+    {
+        std::string race = r.str();
+        ShipManager* sm = Ship(0);
+        CrewMember* c = sm ? sm->AddCrewMemberFromString("Test", race, false, 0, true, true) : nullptr;
+        if (c) CoopGame::Logf("test add crew %s: %d abilities", race.c_str(), (int)CM_EX(c)->crewPowers.size());
+        else CoopGame::Log("test add crew " + race + ": failed");
         break;
     }
     case C_TEST_ADD_SYSTEM:
@@ -684,6 +711,65 @@ HOOK_METHOD_PRIORITY(StarMap, OnLoop, -10000, () -> void)
         this->finalSectorChoice = -1;
     }
     super();
+}
+
+// ---------------------------------------------------------------- crew abilities (Hyperspace)
+// A player activates an ability with the "lockdown" hotkey (selected crew) or the crew box's ability button; Hyperspace's
+// hooks (CustomCrew.cpp, priority 0) then call PreparePower on this copy only. Wrap them (-10000 is outermost) and
+// send a command instead, choosing the power exactly as they do.
+
+static void SubmitCrewPower(CrewMember* c, int powerIndex)
+{
+    for (int ship = 0; ship <= 1; ++ship)
+    {
+        int idx = CoopCommands::CrewIndex(CoopCommands::Ship(ship), c);
+        if (idx < 0) continue;
+        Writer w; w.u8(C_CREW_POWER); w.u8((uint8_t)ship); w.u16((uint16_t)idx); w.u8((uint8_t)powerIndex);
+        CoopGame::SubmitLocal(w.b);
+        return;
+    }
+}
+
+HOOK_METHOD_PRIORITY(CrewControl, KeyDown, -10000, (SDLKey key) -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> CrewControl::KeyDown -> Begin (CoopCommands.cpp)\n")
+    if (!ShouldTakeOver() || key != Settings::GetHotkey("lockdown")) { super(key); return; }
+    for (CrewMember* c : this->selectedCrew)
+    {
+        CrewMember_Extend* ex = CM_EX(c);
+        if (!ex->hasSpecialPower || c->GetPowerOwner() != 0) continue;
+        bool any = false;
+        for (size_t i = 0; i < ex->crewPowers.size(); ++i)   // "always" hotkey powers
+        {
+            ActivatedPower* p = ex->crewPowers[i];
+            if (p->enabled && p->def->onHotkey == ActivatedPowerDefinition::HOTKEY_ALWAYS && p->PowerReady() == PowerReadyState::POWER_READY)
+            { SubmitCrewPower(c, (int)i); any = true; }
+        }
+        if (any) continue;
+        for (size_t i = 0; i < ex->crewPowers.size(); ++i)   // else the first "first" hotkey power
+        {
+            ActivatedPower* p = ex->crewPowers[i];
+            if (p->enabled && p->def->onHotkey == ActivatedPowerDefinition::HOTKEY_FIRST && p->PowerReady() == PowerReadyState::POWER_READY)
+            { SubmitCrewPower(c, (int)i); break; }
+        }
+    }
+}
+
+HOOK_METHOD_PRIORITY(CrewBox, MouseClick, -10000, () -> bool)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> CrewBox::MouseClick -> Begin (CoopCommands.cpp)\n")
+    if (!ShouldTakeOver()) return super();
+    for (ActivatedPowerButton& b : CBOX_EX(this)->powerButtons)
+    {
+        if (!b.button.bActive || !b.button.bHover) continue;
+        if (b.power->PowerReady() == PowerReadyState::POWER_READY && this->pCrew->GetPowerOwner() == 0)
+        {
+            CrewMember_Extend* ex = CM_EX(this->pCrew);
+            for (size_t i = 0; i < ex->crewPowers.size(); ++i) if (ex->crewPowers[i] == b.power) SubmitCrewPower(this->pCrew, (int)i);
+        }
+        return true;
+    }
+    return super();
 }
 
 // ---------------------------------------------------------------- special systems

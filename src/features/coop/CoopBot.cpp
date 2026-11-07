@@ -120,6 +120,28 @@ void BeforeFrame(uint32_t frame)
         }
     }
 
+    // abilities: the host adds crew of races with abilities (test command, every copy), then any copy selects a crew
+    // member now and then and presses the ability hotkey through the real input path.
+    if (cfg.bot == "abilities")
+    {
+        // Two crew (5 in all: the ship holds 8, more opens the crew-dismiss screen).
+        static const char* races[] = { "crystal", "mantis" };
+        if (captain && frame >= 10 && frame < 12)
+        {
+            Writer w; w.u8(CoopCommands::C_TEST_ADD_CREW); w.str(races[frame - 10]); CoopGame::SubmitLocal(w.b);
+        }
+        if (frame > 120 && Rand(30) == 0 && !ship->vCrewList.empty())
+        {
+            CrewMember* c = ship->vCrewList[Rand((int)ship->vCrewList.size())];
+            CrewControl& cc = gui->crewControl;
+            cc.selectedCrew.clear();
+            cc.selectedCrew.push_back(c);
+            CoopGame::Log("BOT ability key for " + c->species);
+            G_->GetCApp()->OnKeyDown(Settings::GetHotkey("lockdown"));
+            G_->GetCApp()->OnKeyUp(Settings::GetHotkey("lockdown"));
+        }
+    }
+
     // keys: press real hotkeys through CApp::OnKeyDown, the path a player's keyboard takes. Every action must be
     // taken over by co-op; anything that changes only this copy shows up as a desync.
     if (cfg.bot == "keys" && frame >= 60 && Rand(40) == 0)
@@ -152,7 +174,7 @@ void BeforeFrame(uint32_t frame)
         gui->upgradeScreen.MouseClick(640, 360);
     }
 
-    bool fight = cfg.bot == "fight" || cfg.bot == "specials" || cfg.bot == "sector";
+    bool fight = cfg.bot == "fight" || cfg.bot == "specials" || cfg.bot == "sector" || cfg.bot == "abilities";
     bool specials = cfg.bot == "specials";
     // specials: the captain installs cloaking (10), battery (12), mind control (14), hacking (15) at the start (test
     // command), then every copy uses them now and then.

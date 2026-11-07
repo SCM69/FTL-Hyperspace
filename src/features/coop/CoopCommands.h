@@ -27,6 +27,8 @@ enum Type : uint8_t
     C_MIND = 18,         // u8 ship id, i16 room, u8 n, n x u16 crew index (in that ship's crew list)
     C_TELEPORT = 19,     // i16 target room, i32 command (CombatControl teleport command)
     C_SECTOR = 20,       // u8 next sector index (StarMap::finalSectorChoice). Captain only.
+    C_CREW_POWER = 21,   // u8 ship id (whose crew list), u16 crew index, u8 power index (Hyperspace crew ability)
+    C_TEST_ADD_CREW = 101,   // str race (tests only: FTL_COOP_TEST=1)
     C_TEST_ADD_SYSTEM = 100, // u8 system type (tests only: FTL_COOP_TEST=1)
 };
 
