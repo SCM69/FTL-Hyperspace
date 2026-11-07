@@ -4,7 +4,8 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd); ROOT=$(cd "$HERE/../../.." && pwd)
 DLL=$(realpath "$1"); OUT=$(realpath -m "$2")
 TMP=$(mktemp -d); trap 'rm -r "$TMP"' EXIT
-cp "$DLL" "$ROOT/Release Files/Windows/mod/xinput1_4.dll" "$HERE/coop-install.bat" "$HERE/README-COOP.txt" "$TMP/"
+[ -f "$HERE/setup/coop-setup.exe" ] || { echo "build coop-setup.exe first: buildscripts/docker-run-in-devcontainer.sh buildscripts/coop-setup-build.sh"; exit 1; }
+cp "$DLL" "$ROOT/Release Files/Windows/mod/xinput1_4.dll" "$HERE/setup/coop-setup.exe" "$HERE/README-COOP.txt" "$TMP/"
 cp "$ROOT/LICENSE" "$ROOT/COPYRIGHT.md" "$TMP/"
 rm -f "$OUT"
 python3 -I -c 'import sys, zipfile, os

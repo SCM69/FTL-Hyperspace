@@ -52,8 +52,8 @@ cp "$HERE/$SO_NAME" "$DATA/$SO_NAME"
 if [ ! -f "$DATA/coop.cfg" ]; then
   cat > "$DATA/coop.cfg" <<'CFG'
 # FTL Co-op settings. Lines starting with # are ignored.
-# role: host (you run the game others join) or guest (you join a host). Remove the line to play alone.
-role=host
+# role: menu (pick host / join on the main menu), host, guest, or remove the line to play alone.
+role=menu
 # net=steam: the host opens a friends-only Steam lobby; guests join a Steam friend who hosts. No addresses.
 # net=tcp: connect by address instead (the host forwards TCP port 27890, or everyone uses a VPN)
 net=steam
@@ -69,6 +69,8 @@ players=2
 mode=ffa
 # host: new (new run) or continue (your saved run)
 start=new
+# drop a player who has been silent this many seconds
+timeout=20
 CFG
 fi
 
@@ -82,5 +84,5 @@ if ! grep -q "$SO_NAME" "$DATA/FTL"; then
 fi
 
 echo "Installed into: $DATA"
-echo "Edit $DATA/coop.cfg (role, players), then start FTL from Steam as usual. Guests join a Steam friend who hosts."
+echo "Start FTL from Steam. On the main menu: H hosts a game, J joins a Steam friend who hosts (settings: $DATA/coop.cfg)."
 echo "Remove with: $0 --uninstall \"$FTL\""
