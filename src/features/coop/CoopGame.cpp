@@ -942,6 +942,28 @@ HOOK_GLOBAL_PRIORITY(random32, 9000, () -> unsigned int)
     return super();
 }
 
+// Opening the star map is local UI (one player looks at the map), but Hyperspace's StarMap::Open draws random32 twice
+// for the ship icon's rotation (CustomEvents.cpp): on that copy alone the shared stream moved on, a desync on the next
+// hash (found by the sector bot, 2026-11-07). Keep a player's map opening and closing out of both random streams.
+// (Hyperspace's jump-event queue, also run from StarMap::Open, is used only by data mods; vanilla data leaves it empty.)
+HOOK_METHOD_PRIORITY(StarMap, Open, -10000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> StarMap::Open -> Begin (CoopGame.cpp)\n")
+    if (!CoopGame::InLockstep() || CoopGame::Applying()) { super(); return; }
+    uint64_t sil = CoopRng::GetSil(), st = CoopRng::GetState();
+    super();
+    CoopRng::SetSil(sil); CoopRng::SetState(st);
+}
+
+HOOK_METHOD_PRIORITY(StarMap, Close, -10000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> StarMap::Close -> Begin (CoopGame.cpp)\n")
+    if (!CoopGame::InLockstep() || CoopGame::Applying()) { super(); return; }
+    uint64_t sil = CoopRng::GetSil(), st = CoopRng::GetState();
+    super();
+    CoopRng::SetSil(sil); CoopRng::SetState(st);
+}
+
 // Animation::Update draws random32 for cosmetic choices (random flicker frame, random frame sound). It is called from
 // both simulation and UI code, and how often depends on rendering, so a copy that catches up (several frames
 // without a render) drew a different number of values (seen with FTL_COOP_TEST_HITCH, 2026-11-06).

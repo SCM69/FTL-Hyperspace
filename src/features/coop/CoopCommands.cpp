@@ -39,6 +39,7 @@ Bytes Fire(int weapon, int target, bool autoFire, const std::vector<Pointf>& pts
 Bytes WeaponClear(int weapon) { Writer w; w.u8(C_WEAPON_CLEAR); w.u8((uint8_t)weapon); return w.b; }
 Bytes SetMode(CoopGame::Mode m) { Writer w; w.u8(C_SET_MODE); w.u8((uint8_t)m); return w.b; }
 Bytes Jump(int loc) { Writer w; w.u8(C_JUMP); w.u16((uint16_t)loc); return w.b; }
+Bytes SectorChoice(int s) { Writer w; w.u8(C_SECTOR); w.u8((uint8_t)s); return w.b; }
 Bytes AutoFire(bool on) { Writer w; w.u8(C_AUTOFIRE); w.u8(on ? 1 : 0); return w.b; }
 Bytes AssignCrew(int crew, int slot) { Writer w; w.u8(C_ASSIGN_CREW); w.u16((uint16_t)crew); w.u8((uint8_t)(int8_t)slot); return w.b; }
 
@@ -169,7 +170,7 @@ bool Allowed(int slot, const Bytes& cmd, CoopGame::Mode mode, std::string* reaso
     case C_TEST_ADD_SYSTEM:
         if (!getenv("FTL_COOP_TEST")) { *reason = "test command"; return false; }
         return slot == 0;
-    case C_CHOICE: case C_ASSIGN_CREW: case C_SET_MODE: case C_JUMP:
+    case C_CHOICE: case C_ASSIGN_CREW: case C_SET_MODE: case C_JUMP: case C_SECTOR:
         if (slot != 0) { *reason = "only the captain (host) can do that"; return false; }
         return true;
     case C_PAUSE:
@@ -235,6 +236,7 @@ std::string Describe(const Bytes& cmd)
     case C_WEAPON_CLEAR: snprintf(buf, sizeof(buf), "clear weapon%d", r.u8()); break;
     case C_AUTOFIRE: snprintf(buf, sizeof(buf), "autofire %d", r.u8()); break;
     case C_JUMP: snprintf(buf, sizeof(buf), "jump to location %d", r.u16()); break;
+    case C_SECTOR: snprintf(buf, sizeof(buf), "next sector %d", r.u8()); break;
     case C_CLOAK: snprintf(buf, sizeof(buf), "cloak %d", r.u8()); break;
     case C_BATTERY: snprintf(buf, sizeof(buf), "battery %d", r.u8()); break;
     case C_HACK_PULSE: snprintf(buf, sizeof(buf), "hack pulse"); break;
@@ -357,6 +359,23 @@ void Apply(int slot, const Bytes& cmd)
         if (gui && gui->shipScreens.bOpen) gui->shipScreens.Close();
         map.potentialLoc = loc;
         map.readyToTravel = true;
+        break;
+    }
+    case C_SECTOR:
+    {
+        // What Hyperspace's StarMap::OnLoop does with finalSectorChoice (CustomMap.cpp), on every copy at this frame.
+        int choice = r.u8();
+        StarMap& map = G_->GetWorld()->starMap;
+        if (!map.NeighboringSector(choice)) { CoopGame::Log("sector choice ignored: not a neighbouring sector"); break; }
+        if (gui && gui->storeScreens.bOpen) gui->storeScreens.Close();
+        if (gui && gui->shipScreens.bOpen) gui->shipScreens.Close();
+        map.SelectNewSector(choice);
+        map.AdvanceWorldLevel();
+        map.readyToTravel = true;
+        map.finalSectorChoice = -1;
+        map.potentialLoc = &map.dummyNewSector;
+        if (map.bOpen) map.Close();
+        CoopGame::Logf("sector chosen: world level now %d, readyToTravel %d", map.worldLevel, (int)map.readyToTravel);
         break;
     }
     case C_TEST_ADD_SYSTEM:
@@ -636,7 +655,7 @@ HOOK_METHOD_PRIORITY(StarMap, MouseClick, 9000, (int mX, int mY) -> void)
 {
     LOG_HOOK("HOOK_METHOD_PRIORITY -> StarMap::MouseClick -> Begin (CoopCommands.cpp)\n")
     bool takeOver = ShouldTakeOver();
-    // The next sector is the captain's choice (not a command yet: the host's choice reaches the others by a resync).
+    // The next sector is the captain's choice; the host's pick is sent as C_SECTOR (StarMap::OnLoop hook below).
     if (takeOver && this->bChoosingNewSector && CoopGame::GetSession() && !CoopGame::GetSession()->IsHost())
     {
         ShowMessage("The captain (host) chooses the next sector");
@@ -650,6 +669,21 @@ HOOK_METHOD_PRIORITY(StarMap, MouseClick, 9000, (int mX, int mY) -> void)
         for (size_t i = 0; i < this->locations.size(); ++i)
             if (this->locations[i] == this->potentialLoc) CoopGame::SubmitLocal(CoopCommands::Jump((int)i));
     }
+}
+
+// The sector choice (a click on a sector, or its jump button) lands in finalSectorChoice, which Hyperspace's
+// StarMap::OnLoop (priority 9999) then acts on locally. Run first (hooks are chained with the lowest priority
+// outermost, so -10000 wraps every other hook): the host sends it as a command, and no copy acts on it outside lockstep.
+HOOK_METHOD_PRIORITY(StarMap, OnLoop, -10000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> StarMap::OnLoop -> Begin (CoopCommands.cpp)\n")
+    if (CoopGame::InLockstep() && !CoopGame::Applying() && this->finalSectorChoice >= 0)
+    {
+        coop::Session* s = CoopGame::GetSession();
+        if (s && s->IsHost() && this->NeighboringSector(this->finalSectorChoice)) CoopGame::SubmitLocal(SectorChoice(this->finalSectorChoice));
+        this->finalSectorChoice = -1;
+    }
+    super();
 }
 
 // ---------------------------------------------------------------- special systems

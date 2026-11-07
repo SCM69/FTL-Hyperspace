@@ -26,6 +26,7 @@ enum Type : uint8_t
     C_HACK_TARGET = 17,  // u8 target ship id, u8 system type
     C_MIND = 18,         // u8 ship id, i16 room, u8 n, n x u16 crew index (in that ship's crew list)
     C_TELEPORT = 19,     // i16 target room, i32 command (CombatControl teleport command)
+    C_SECTOR = 20,       // u8 next sector index (StarMap::finalSectorChoice). Captain only.
     C_TEST_ADD_SYSTEM = 100, // u8 system type (tests only: FTL_COOP_TEST=1)
 };
 
@@ -51,6 +52,7 @@ coop::Bytes Fire(int weaponIndex, int targetShip, bool autoFire, const std::vect
 coop::Bytes WeaponClear(int weaponIndex);
 coop::Bytes AutoFire(bool on);
 coop::Bytes Jump(int locationIndex);
+coop::Bytes SectorChoice(int sectorIndex);
 coop::Bytes SetMode(CoopGame::Mode m);
 
 } // namespace CoopCommands

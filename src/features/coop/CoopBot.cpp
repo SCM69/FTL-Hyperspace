@@ -79,7 +79,7 @@ void BeforeFrame(uint32_t frame)
     // Captain: jump to a random neighbouring beacon when the FTL drive is charged and nothing else is going on.
     ShipManager* foe = G_->GetShipManager(1);
     bool foeGone = !foe || foe->bDestroyed || foe->ship.hullIntegrity.first <= 0;
-    if (captain && frame % 60 == 30 && !gui->choiceBox.bOpen && foeGone && !ship->bJumping &&
+    if (captain && cfg.bot != "sector" && frame % 60 == 30 && !gui->choiceBox.bOpen && foeGone && !ship->bJumping &&
         (ship->lastJumpReady || ship->jump_timer.first >= ship->jump_timer.second) && ship->fuel_count > 0)
     {
         StarMap& map = G_->GetWorld()->starMap;
@@ -88,6 +88,35 @@ void BeforeFrame(uint32_t frame)
             Location* target = map.currentLoc->connectedLocations[Rand((int)map.currentLoc->connectedLocations.size())];
             for (size_t i = 0; i < map.locations.size(); ++i)
                 if (map.locations[i] == target) CoopGame::SubmitLocal(CoopCommands::Jump((int)i));
+        }
+    }
+
+    // sector: the captain leaves the sector whenever the FTL drive is charged (no beacon jumps), at most every 300 frames,
+    // choosing like the sector screen does:
+    // bChoosingNewSector is the screen's local state, finalSectorChoice what a click sets.
+    if (cfg.bot == "sector" && captain && frame % 300 == 0)
+    {
+        StarMap& m = G_->GetWorld()->starMap; int nb = 0;
+        for (int i = 0; i < (int)m.sectors.size(); ++i) if (m.NeighboringSector(i)) ++nb;
+        CoopGame::Logf("BOT sector check: level=%d sectorNo=%d sectors=%zu neighbours=%d choice=%d jumping=%d ready=%d timer=%.1f/%.1f fuel=%d",
+                       m.worldLevel, m.currentSector ? m.currentSector->level : -1, m.sectors.size(), nb, (int)gui->choiceBox.bOpen, (int)ship->bJumping, (int)ship->lastJumpReady,
+                       ship->jump_timer.first, ship->jump_timer.second, ship->fuel_count);
+    }
+    static uint32_t lastSectorPick = 0;
+    if (frame < lastSectorPick) lastSectorPick = 0;   // new epoch
+    if (cfg.bot == "sector" && captain && frame >= lastSectorPick + 300 && !gui->choiceBox.bOpen && !ship->bJumping &&
+        (ship->lastJumpReady || ship->jump_timer.first >= ship->jump_timer.second) && ship->fuel_count > 0)
+    {
+        lastSectorPick = frame;
+        StarMap& map = G_->GetWorld()->starMap;
+        std::vector<int> next;
+        for (int i = 0; i < (int)map.sectors.size(); ++i) if (map.NeighboringSector(i)) next.push_back(i);
+        if (!next.empty())
+        {
+            if (!map.bOpen) map.Open();   // a player opens the map to choose
+            map.bChoosingNewSector = true;
+            map.finalSectorChoice = next[Rand((int)next.size())];
+            CoopGame::Log("BOT captain picks sector " + std::to_string(map.finalSectorChoice) + " of " + std::to_string(next.size()));
         }
     }
 
@@ -123,7 +152,7 @@ void BeforeFrame(uint32_t frame)
         gui->upgradeScreen.MouseClick(640, 360);
     }
 
-    bool fight = cfg.bot == "fight" || cfg.bot == "specials";
+    bool fight = cfg.bot == "fight" || cfg.bot == "specials" || cfg.bot == "sector";
     bool specials = cfg.bot == "specials";
     // specials: the captain installs cloaking (10), battery (12), mind control (14), hacking (15) at the start (test
     // command), then every copy uses them now and then.
