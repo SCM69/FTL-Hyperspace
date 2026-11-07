@@ -11,6 +11,8 @@ public:
     void AddUpgradeBox(UpgradeBox* box);
     bool OnLoop();
     void Accept();
+    // Co-op tests: every box on every page.
+    std::vector<UpgradeBox*> AllBoxes() const { std::vector<UpgradeBox*> v; for (auto& p : boxes) v.insert(v.end(), p.begin(), p.end()); return v; }
 private:
     int GetNumPages()
     {
@@ -49,6 +51,8 @@ public:
     {
         return &instance;
     }
+    // Co-op tests: the system and subsystem boxes.
+    std::vector<UpgradeBox*> AllBoxes() const { auto a = systemBoxes.AllBoxes(), b = subSystemBoxes.AllBoxes(); a.insert(a.end(), b.begin(), b.end()); return a; }
 private:
     UpgradeBoxSet<8> systemBoxes;
     UpgradeBoxSet<4> subSystemBoxes;

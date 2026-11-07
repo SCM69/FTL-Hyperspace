@@ -10,6 +10,7 @@ using coop::Bytes;
 using coop::Reader;
 using coop::Writer;
 
+namespace CoopCaptain { void CommandApplied(); }
 namespace CoopCommands {
 
 static int g_inputDepth = 0;
@@ -60,6 +61,40 @@ static CrewMember* CrewAt(ShipManager* s, int i)
 {
     if (!s || i < 0 || i >= (int)s->vCrewList.size()) return nullptr;
     return s->vCrewList[i];
+}
+
+// Stores: 0 = the store of this beacon's event, 1 = the test store (C_TEST_STORE). A box is named by its list and
+// position; every copy built the same store at the same frame.
+static Store* g_testStore = nullptr;
+}  // namespace CoopCommands
+Store* CoopCommands::TestStore() { return CoopCommands::g_testStore; }
+namespace CoopCommands {
+static Store* StoreOf(int st)
+{
+    if (st == 1) return g_testStore;
+    WorldManager* w = G_->GetWorld();
+    return w && w->baseLocationEvent ? w->baseLocationEvent->pStore : nullptr;
+}
+static StoreBox* StoreBoxAt(int st, int list, int i)
+{
+    Store* s = StoreOf(st);
+    if (!s) return nullptr;
+    auto& v = list == 0 ? s->vStoreBoxes : s->vItemBoxes;
+    return i >= 0 && i < (int)v.size() ? v[i] : nullptr;
+}
+static bool FindStoreBox(StoreBox* box, int* st, int* list, int* idx)
+{
+    for (int s = 0; s <= 1; ++s)
+    {
+        Store* store = StoreOf(s);
+        if (!store) continue;
+        for (int l = 0; l <= 1; ++l)
+        {
+            auto& v = l == 0 ? store->vStoreBoxes : store->vItemBoxes;
+            for (size_t i = 0; i < v.size(); ++i) if (v[i] == box) { *st = s; *list = l; *idx = (int)i; return true; }
+        }
+    }
+    return false;
 }
 
 static ShipSystem* SystemOf(ShipManager* s, int type)
@@ -132,6 +167,7 @@ void SetCrewOwner(int crewIndex, int slot)
 }
 } // namespace CoopGame
 
+namespace CoopCaptain { void CommandApplied(); }
 namespace CoopCommands {
 
 // A slot staffs a room when one of its crew stands in it (on the player ship).
@@ -169,10 +205,10 @@ bool Allowed(int slot, const Bytes& cmd, CoopGame::Mode mode, std::string* reaso
     uint8_t t = r.u8();
     switch (t)
     {
-    case C_TEST_ADD_SYSTEM: case C_TEST_ADD_CREW:
+    case C_TEST_ADD_SYSTEM: case C_TEST_ADD_CREW: case C_TEST_STORE:
         if (!getenv("FTL_COOP_TEST")) { *reason = "test command"; return false; }
         return slot == 0;
-    case C_CHOICE: case C_ASSIGN_CREW: case C_SET_MODE: case C_JUMP: case C_SECTOR:
+    case C_CHOICE: case C_ASSIGN_CREW: case C_SET_MODE: case C_JUMP: case C_SECTOR: case C_BUY: case C_UPGRADE:
         if (slot != 0) { *reason = "only the captain (host) can do that"; return false; }
         return true;
     case C_PAUSE:
@@ -241,6 +277,9 @@ std::string Describe(const Bytes& cmd)
     case C_SECTOR: snprintf(buf, sizeof(buf), "next sector %d", r.u8()); break;
     case C_CREW_POWER: { int sh = r.u8(); int ci = r.u16(); snprintf(buf, sizeof(buf), "crew power ship%d crew%d power%d", sh, ci, r.u8()); break; }
     case C_TEST_ADD_CREW: snprintf(buf, sizeof(buf), "test add crew %s", r.str().c_str()); break;
+    case C_BUY: { int st = r.u8(); int li = r.u8(); snprintf(buf, sizeof(buf), "buy store%d list%d box%d", st, li, r.u8()); break; }
+    case C_UPGRADE: { int sy = r.u8(); int lv = r.u8(); snprintf(buf, sizeof(buf), "upgrade sys%d +%d cost %d", sy, lv, r.u16()); break; }
+    case C_TEST_STORE: snprintf(buf, sizeof(buf), "test store"); break;
     case C_CLOAK: snprintf(buf, sizeof(buf), "cloak %d", r.u8()); break;
     case C_BATTERY: snprintf(buf, sizeof(buf), "battery %d", r.u8()); break;
     case C_HACK_PULSE: snprintf(buf, sizeof(buf), "hack pulse"); break;
@@ -394,6 +433,53 @@ void Apply(int slot, const Bytes& cmd)
         bool ready = power->enabled && power->PowerReady() == PowerReadyState::POWER_READY && c->GetPowerOwner() == 0;
         if (ready) power->PreparePower();
         CoopGame::Logf("crew power: %s power %d %s", c->species.c_str(), p, ready ? "activated" : "not ready (ignored)");
+        break;
+    }
+    case C_BUY:
+    {
+        int st = r.u8(); int li = r.u8(); int i = r.u8();
+        StoreBox* box = StoreBoxAt(st, li, i);
+        ShipManager* sm = Ship(0);
+        if (!box || !sm) { CoopGame::Log("buy ignored: no such store box"); break; }
+        // StoreBox::MouseClick buys only what the player can afford and hold; do the same check here.
+        bool ok = box->count > 0 && sm->currentScrap >= box->desc.cost && box->CanHold();
+        int before = sm->currentScrap;
+        if (ok) box->Purchase();
+        CoopCaptain::CommandApplied();
+        CoopGame::Logf("buy: %s (cost %d) %s, scrap %d -> %d", box->pBlueprint ? box->pBlueprint->name.c_str() : "item", box->desc.cost,
+                       ok ? "bought" : "refused", before, sm->currentScrap);
+        break;
+    }
+    case C_UPGRADE:
+    {
+        int type = r.u8(); int levels = r.u8(); int cost = r.u16();
+        ShipManager* sm = Ship(0);
+        if (!sm || sm->currentScrap < cost || levels <= 0) { CoopGame::Log("upgrade ignored (scrap)"); break; }
+        if (type == 255)
+        {
+            // The reactor: the upgrade screen's own button applies it (ReactorButton::Accept).
+            ReactorButton& rb = gui->upgradeScreen.reactorButton;
+            if (!rb.ship) { CoopGame::Log("upgrade ignored: reactor button not set up"); break; }
+            sm->currentScrap -= cost;
+            int saved = rb.tempUpgrade; rb.tempUpgrade = levels; rb.Accept(); rb.tempUpgrade = saved;
+        }
+        else
+        {
+            ShipSystem* sys = SystemOf(sm, type);
+            if (!sys) { CoopGame::Log("upgrade ignored: no such system"); break; }
+            sm->currentScrap -= cost;
+            sys->UpgradeSystem(levels);
+        }
+        CoopCaptain::CommandApplied();
+        CoopGame::Logf("upgrade: sys %d +%d for %d scrap, scrap now %d", type, levels, cost, sm->currentScrap);
+        break;
+    }
+    case C_TEST_STORE:
+    {
+        if (gui) g_testStore = gui->CreateNewStore(G_->GetWorld()->starMap.worldLevel);
+        if (Ship(0)) Ship(0)->currentScrap += 500;   // something to spend
+        CoopGame::Logf("test store created (%d store boxes, %d item boxes)", g_testStore ? (int)g_testStore->vStoreBoxes.size() : -1,
+                       g_testStore ? (int)g_testStore->vItemBoxes.size() : -1);
         break;
     }
     case C_TEST_ADD_CREW:
@@ -770,6 +856,112 @@ HOOK_METHOD_PRIORITY(CrewBox, MouseClick, -10000, () -> bool)
         return true;
     }
     return super();
+}
+
+// ---------------------------------------------------------------- store and upgrades (the captain's)
+// A purchase reaches StoreBox::Purchase (after the click's checks and any confirm dialog). On the host, outside a
+// command, send it as C_BUY instead; the derived Purchase functions are hooked too because Linux inlines the base one.
+// A box that is in no known store list (a Hyperspace custom store page) is bought locally; the captain-screen resync
+// then brings everyone along as before.
+static bool g_inPurchaseHook = false;
+static bool TakeOverPurchase(StoreBox* box)
+{
+    if (g_inPurchaseHook || !CoopGame::InLockstep() || CoopGame::Applying()) return false;
+    coop::Session* s = CoopGame::GetSession();
+    if (!s || !s->IsHost()) return false;
+    int st, list, idx;
+    if (!FindStoreBox(box, &st, &list, &idx)) { CoopGame::Log("purchase from an unknown store box: bought locally"); return false; }
+    Writer w; w.u8(C_BUY); w.u8((uint8_t)st); w.u8((uint8_t)list); w.u8((uint8_t)idx);
+    CoopGame::SubmitLocal(w.b);
+    return true;
+}
+#define COOP_PURCHASE_HOOK(cls) \
+HOOK_METHOD_PRIORITY(cls, Purchase, -10000, () -> void) \
+{ \
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> " #cls "::Purchase -> Begin (CoopCommands.cpp)\n") \
+    if (TakeOverPurchase((StoreBox*)this)) return; \
+    bool outer = !g_inPurchaseHook; g_inPurchaseHook = true; \
+    super(); \
+    if (outer) g_inPurchaseHook = false; \
+}
+COOP_PURCHASE_HOOK(StoreBox)
+COOP_PURCHASE_HOOK(WeaponStoreBox)
+COOP_PURCHASE_HOOK(DroneStoreBox)
+COOP_PURCHASE_HOOK(AugmentStoreBox)
+COOP_PURCHASE_HOOK(ItemStoreBox)
+COOP_PURCHASE_HOOK(RepairStoreBox)
+COOP_PURCHASE_HOOK(CrewStoreBox)
+COOP_PURCHASE_HOOK(SystemStoreBox)
+
+// Scrap moved by the upgrade screen's clicks (UpgradeBox / ReactorButton click, right click, Undo) on this copy,
+// measured around the outermost of those calls. Accept below undoes the rest, so it returns to 0.
+static int g_pendingUpgradeScrap = 0;
+static int g_upgradeDepth = 0;
+static bool HostOutsideCommand();
+int CoopCommands::PendingUpgradeScrap() { return g_pendingUpgradeScrap; }
+struct UpgradeScrapMeter
+{
+    ShipManager* s; int before; bool outer;
+    explicit UpgradeScrapMeter(ShipManager* ship) : s(ship), before(ship ? ship->currentScrap : 0), outer(g_upgradeDepth++ == 0) {}
+    ~UpgradeScrapMeter() { --g_upgradeDepth; if (outer && s && s->iShipId == 0 && HostOutsideCommand()) g_pendingUpgradeScrap += before - s->currentScrap; }
+};
+static bool HostOutsideCommand()
+{
+    coop::Session* s = CoopGame::GetSession();
+    return CoopGame::InLockstep() && !CoopGame::Applying() && s && s->IsHost();
+}
+HOOK_METHOD_PRIORITY(UpgradeBox, MouseClick, -10000, (int x, int y) -> void)
+{ LOG_HOOK("HOOK_METHOD_PRIORITY -> UpgradeBox::MouseClick -> Begin (CoopCommands.cpp)\n") UpgradeScrapMeter m(this->ship); super(x, y); }
+HOOK_METHOD_PRIORITY(UpgradeBox, MouseRightClick, -10000, (int x, int y) -> void)
+{ LOG_HOOK("HOOK_METHOD_PRIORITY -> UpgradeBox::MouseRightClick -> Begin (CoopCommands.cpp)\n") UpgradeScrapMeter m(this->ship); super(x, y); }
+HOOK_METHOD_PRIORITY(UpgradeBox, Undo, -10000, () -> void)
+{ LOG_HOOK("HOOK_METHOD_PRIORITY -> UpgradeBox::Undo -> Begin (CoopCommands.cpp)\n") UpgradeScrapMeter m(this->ship); super(); }
+HOOK_METHOD_PRIORITY(ReactorButton, OnClick, -10000, () -> void)
+{ LOG_HOOK("HOOK_METHOD_PRIORITY -> ReactorButton::OnClick -> Begin (CoopCommands.cpp)\n") UpgradeScrapMeter m(this->ship); super(); }
+HOOK_METHOD_PRIORITY(ReactorButton, OnRightClick, -10000, () -> void)
+{ LOG_HOOK("HOOK_METHOD_PRIORITY -> ReactorButton::OnRightClick -> Begin (CoopCommands.cpp)\n") UpgradeScrapMeter m(this->ship); super(); }
+HOOK_METHOD_PRIORITY(ReactorButton, Undo, -10000, () -> void)
+{ LOG_HOOK("HOOK_METHOD_PRIORITY -> ReactorButton::Undo -> Begin (CoopCommands.cpp)\n") UpgradeScrapMeter m(this->ship); super(); }
+
+// Upgrades: clicking an upgrade box takes the scrap on this copy at once (Undo gives it back); closing the screen calls
+// Accept. On the host, Accept undoes its own pending levels (measuring their cost) and sends C_UPGRADE instead.
+
+HOOK_METHOD_PRIORITY(UpgradeBox, Accept, -10000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> UpgradeBox::Accept -> Begin (CoopCommands.cpp)\n")
+    if (HostOutsideCommand() && this->tempUpgrade > 0 && this->system && this->ship && this->ship->iShipId == 0)
+    {
+        int levels = this->tempUpgrade, before = this->ship->currentScrap;
+        for (int k = 0; k < 16 && this->tempUpgrade > 0; ++k) this->Undo();
+        int cost = this->ship->currentScrap - before;
+        if (this->tempUpgrade == 0 && cost >= 0)
+        {
+            Writer w; w.u8(C_UPGRADE); w.u8((uint8_t)this->system->iSystemType); w.u8((uint8_t)levels); w.u16((uint16_t)cost);
+            CoopGame::SubmitLocal(w.b);
+            return;
+        }
+        CoopGame::Log("upgrade undo did not behave as expected: applied locally");
+    }
+    super();
+}
+
+HOOK_METHOD_PRIORITY(ReactorButton, Accept, -10000, () -> void)
+{
+    LOG_HOOK("HOOK_METHOD_PRIORITY -> ReactorButton::Accept -> Begin (CoopCommands.cpp)\n")
+    if (HostOutsideCommand() && this->tempUpgrade > 0 && this->ship && this->ship->iShipId == 0)
+    {
+        int levels = this->tempUpgrade, before = this->ship->currentScrap;
+        for (int k = 0; k < 32 && this->tempUpgrade > 0; ++k) this->Undo();
+        int cost = this->ship->currentScrap - before;
+        if (this->tempUpgrade == 0 && cost >= 0)
+        {
+            Writer w; w.u8(C_UPGRADE); w.u8(255); w.u8((uint8_t)levels); w.u16((uint16_t)cost);
+            CoopGame::SubmitLocal(w.b);
+            return;
+        }
+        CoopGame::Log("reactor undo did not behave as expected: applied locally");
+    }
+    super();
 }
 
 // ---------------------------------------------------------------- special systems

@@ -4,6 +4,7 @@
 // The bot draws from its own generator so it never consumes the game's random numbers.
 #include "CoopCommands.h"
 #include "Global.h"
+#include "CustomUpgrades.h"
 #include <random>
 using coop::Writer;
 #include <cstdio>
@@ -79,7 +80,7 @@ void BeforeFrame(uint32_t frame)
     // Captain: jump to a random neighbouring beacon when the FTL drive is charged and nothing else is going on.
     ShipManager* foe = G_->GetShipManager(1);
     bool foeGone = !foe || foe->bDestroyed || foe->ship.hullIntegrity.first <= 0;
-    if (captain && cfg.bot != "sector" && frame % 60 == 30 && !gui->choiceBox.bOpen && foeGone && !ship->bJumping &&
+    if (captain && cfg.bot != "sector" && !gui->shipScreens.bOpen && !gui->storeScreens.bOpen && frame % 60 == 30 && !gui->choiceBox.bOpen && foeGone && !ship->bJumping &&
         (ship->lastJumpReady || ship->jump_timer.first >= ship->jump_timer.second) && ship->fuel_count > 0)
     {
         StarMap& map = G_->GetWorld()->starMap;
@@ -140,6 +141,55 @@ void BeforeFrame(uint32_t frame)
             G_->GetCApp()->OnKeyDown(Settings::GetHotkey("lockdown"));
             G_->GetCApp()->OnKeyUp(Settings::GetHotkey("lockdown"));
         }
+    }
+
+    // shop: the host gets a store (test command, every copy) and 500 scrap, buys a few things the way a click ends
+    // (StoreBox::Purchase), then upgrades shields and the reactor through the upgrade screen's boxes (MouseMove +
+    // MouseClick on the box, then closing the screen accepts).
+    if (cfg.bot == "shop" && captain)
+    {
+        if (frame == 200) { Writer w; w.u8(CoopCommands::C_TEST_STORE); CoopGame::SubmitLocal(w.b); }
+        Store* st = CoopCommands::TestStore();
+        if (st && frame >= 260 && frame < 560 && frame % 60 == 20)
+        {
+            int k = (int)(frame - 260) / 60;   // 0..4
+            std::vector<StoreBox*> all(st->vStoreBoxes.begin(), st->vStoreBoxes.end());
+            all.insert(all.end(), st->vItemBoxes.begin(), st->vItemBoxes.end());
+            if (k < (int)all.size())
+            {
+                StoreBox* b = all[(k * 3) % all.size()];
+                CoopGame::Logf("BOT shop buys box %d: %s cost %d count %d", (k * 3) % (int)all.size(), b->pBlueprint ? b->pBlueprint->name.c_str() : "item", b->desc.cost, b->count);
+                if (b->count > 0 && ship->currentScrap >= b->desc.cost && b->CanHold()) b->Purchase();
+            }
+        }
+        // A player opens the ship screen when no jump or event is going on (the button is unavailable during a jump).
+        static uint32_t openedAt = 0;
+        if (frame < openedAt) openedAt = 0;   // new epoch
+        if (!openedAt && frame >= 700 && !ship->bJumping && !gui->choiceBox.bOpen && !G_->GetWorld()->starMap.readyToTravel)
+        { openedAt = frame; gui->shipScreens.Open(); gui->shipScreens.SetTab(0); CoopGame::Log("BOT shop opens upgrades"); }
+        if (openedAt && frame >= openedAt + 20 && frame < openedAt + 60 && frame % 10 == 0)
+        {
+            for (UpgradeBox* b : CustomUpgrades::GetInstance()->AllBoxes())
+            {
+                if (!b || !b->system || (b->system->iSystemType != 0 && b->system->iSystemType != 1)) continue;
+                int x = b->location.x + 10, y = b->location.y + 10;
+                b->MouseMove(x, y);
+                int before = ship->currentScrap;
+                b->MouseClick(x, y);
+                CoopGame::Logf("BOT shop clicks upgrade sys %d: temp %d, scrap %d -> %d", b->system->iSystemType, b->tempUpgrade, before, ship->currentScrap);
+            }
+        }
+        if (openedAt && (frame == openedAt + 10 || frame == openedAt + 15))
+        {
+            int before = ship->currentScrap;
+            ReactorButton& rb = gui->upgradeScreen.reactorButton;
+            CoopGame::Logf("BOT shop reactor button: ship %p active %d hover %d cost %d", (void*)rb.ship, (int)rb.bActive,
+                           (int)rb.bHover, rb.GetReactorCost());
+            rb.bHover = true;
+            gui->upgradeScreen.reactorButton.OnClick();
+            CoopGame::Logf("BOT shop clicks reactor: temp %d, scrap %d -> %d", gui->upgradeScreen.reactorButton.tempUpgrade, before, ship->currentScrap);
+        }
+        if (openedAt && frame == openedAt + 100) { gui->shipScreens.Close(); CoopGame::Log("BOT shop closes upgrades"); }
     }
 
     // keys: press real hotkeys through CApp::OnKeyDown, the path a player's keyboard takes. Every action must be

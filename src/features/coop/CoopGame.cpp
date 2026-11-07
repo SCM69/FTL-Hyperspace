@@ -170,7 +170,10 @@ static void HashShip(coop::Hasher& h, ShipManager* s, bool detailCrew)
 {
     if (!s) { h.val(0xdead); return; }
     h.val(s->ship.hullIntegrity.first);
-    h.val(s->currentScrap); h.val(s->fuel_count); h.val(s->tempMissileCount); h.val(s->tempDroneCount);
+    // The host's pending upgrade clicks hold scrap on its copy only until the screen closes (then they become C_UPGRADE
+    // commands): count it back so the shared state compares equal meanwhile.
+    int scrap = s->currentScrap + (s->iShipId == 0 ? CoopCommands::PendingUpgradeScrap() : 0);
+    h.val(scrap); h.val(s->fuel_count); h.val(s->tempMissileCount); h.val(s->tempDroneCount);
     h.val(s->bJumping); h.val(s->bDestroyed);
     for (ShipSystem* sys : s->vSystemList)
     {
@@ -379,7 +382,8 @@ public:
              (unsigned long long)p.all, (unsigned long long)p.rng, (unsigned long long)p.time, (unsigned long long)p.player,
              (unsigned long long)p.crew, (unsigned long long)p.enemy, (unsigned long long)p.ui, CoopRng::g_randCalls, CoopRng::g_randCallsAll, CoopRng::g_r32Calls);
         if (CoopRng::Tracing()) Log("RNGTRACE " + CoopRng::TraceDump());
-        if (g_session && g_session->Frame() <= 30)
+        static bool allDetail = getenv("FTL_COOP_UIDETAIL") != nullptr;
+        if (g_session && (g_session->Frame() <= 30 || allDetail))
         {
             CommandGui* gui = Gui();
             StarMap& map = G_->GetWorld()->starMap;
@@ -389,6 +393,7 @@ public:
                  gui ? (int)gui->bPaused : -1, gui ? (int)gui->bAutoPaused : -1, gui ? (int)gui->menu_pause : -1,
                  gui ? (int)gui->choiceBox.bOpen : -1, cur, map.locations.size(), map.worldLevel, (int)map.readyToTravel,
                  G_->GetCFPS()->RunningTime, G_->GetCFPS()->SpeedFactor);
+            if (allDetail && gui && gui->choiceBox.bOpen) Log("UIDETAIL choice text: " + gui->choiceBox.mainText.substr(0, 120));
         }
         return p.all;
     }

@@ -2,6 +2,7 @@
 #include "CoopGame.h"
 #include <vector>
 struct Pointf;
+struct Store;
 
 namespace CoopCommands {
 
@@ -28,6 +29,9 @@ enum Type : uint8_t
     C_TELEPORT = 19,     // i16 target room, i32 command (CombatControl teleport command)
     C_SECTOR = 20,       // u8 next sector index (StarMap::finalSectorChoice). Captain only.
     C_CREW_POWER = 21,   // u8 ship id (whose crew list), u16 crew index, u8 power index (Hyperspace crew ability)
+    C_BUY = 22,          // u8 store (0 = this beacon's, 1 = test store), u8 list (0 store boxes, 1 item boxes), u8 index. Captain only.
+    C_UPGRADE = 23,      // u8 system type (255 = reactor), u8 levels, u16 scrap cost. Captain only.
+    C_TEST_STORE = 102,      // - (tests only: FTL_COOP_TEST=1): a store for this sector, like Hyperspace's STORE command
     C_TEST_ADD_CREW = 101,   // str race (tests only: FTL_COOP_TEST=1)
     C_TEST_ADD_SYSTEM = 100, // u8 system type (tests only: FTL_COOP_TEST=1)
 };
@@ -55,6 +59,8 @@ coop::Bytes WeaponClear(int weaponIndex);
 coop::Bytes AutoFire(bool on);
 coop::Bytes Jump(int locationIndex);
 coop::Bytes SectorChoice(int sectorIndex);
+Store* TestStore();   // the store made by C_TEST_STORE (tests)
+int PendingUpgradeScrap();   // host: scrap held by upgrade-screen clicks not accepted yet
 coop::Bytes SetMode(CoopGame::Mode m);
 
 } // namespace CoopCommands

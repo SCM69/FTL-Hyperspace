@@ -24,7 +24,13 @@ static uint64_t ShipFingerprint()
     for (ShipSystem* sys : s->vSystemList) if (sys) { h.val(sys->iSystemType); h.val(sys->powerState.second); h.val(sys->powerState.first); }
     if (s->weaponSystem) for (ProjectileFactory* w : s->weaponSystem->weapons) h.val((void*)(w ? w->blueprint : nullptr));
     if (s->droneSystem) for (Drone* d : s->droneSystem->drones) h.val((void*)d);
+    for (const std::string& a : s->GetAugmentationList()) h.add(a.data(), a.size());
     return h.h;
+}
+
+void CommandApplied()
+{
+    if (g_open) g_before = ShipFingerprint();
 }
 
 bool SuppressDesync()
@@ -61,7 +67,12 @@ HOOK_METHOD_PRIORITY(TabbedWindow, Close, 9000, () -> void)
     CommandGui* gui = G_->GetWorld()->commandGui;
     if (gui->shipScreens.bOpen || gui->storeScreens.bOpen) return; // the other one is still open
     g_open = false;
-    if (IsHostInGame() && (g_dirty || ShipFingerprint() != g_before)) CoopGame::RequestResyncSoon("captain changed the ship");
+    // Purchases and upgrades are commands now (C_BUY, C_UPGRADE): the host's own state was put back before sending, so
+    // the fingerprint changes only for what no command covers (equipment moves, selling, crew screen, Hyperspace
+    // custom stores). Mismatches seen while the screen was open (g_dirty) may come from the scrap a pending upgrade
+    // holds; if anything is really left different, the next hash check finds it and the usual desync resync follows.
+    if (IsHostInGame() && ShipFingerprint() != g_before) CoopGame::RequestResyncSoon("captain changed the ship");
+    else if (IsHostInGame() && g_dirty) CoopGame::Log("captain screens closed: only commands changed the ship; hashes will tell");
 }
 
 HOOK_METHOD_PRIORITY(Store, MouseClick, 9000, (int x, int y) -> void)
