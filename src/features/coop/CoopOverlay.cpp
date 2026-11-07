@@ -4,6 +4,7 @@
 //  F11 host: switch ship sharing (free-for-all <-> own crew)
 #include "CoopCommands.h"
 #include "Global.h"
+#include <algorithm>
 #include <ctime>
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +33,24 @@ static std::string ModeName(CoopGame::Mode m) { return m == CoopGame::Mode::OwnC
 void Render()
 {
     if (!CoopGame::Active()) return;
+    if (CoopGame::WaitingForRoleChoice())
+    {
+        if (!G_->GetCApp()->menu.bOpen) return;
+        std::vector<std::string> lines = CoopGame::RoleMenuLines();
+        // Dark box behind the text (the menu background is busy), clear of the mouse pointer's usual corner.
+        const float x = 24.f, y0 = 24.f, lineH = 16.f;
+        float w = 0.f;
+        for (const std::string& l : lines) w = std::max(w, (float)freetype::easy_measureWidth(6, l));
+        CSurface::GL_DrawRect(x - 10.f, y0 - 8.f, w + 20.f, lineH * lines.size() + 12.f, GL_Color(0.f, 0.f, 0.f, 0.75f));
+        float y = y0;
+        for (size_t i = 0; i < lines.size(); ++i)
+        {
+            if (i == 0) CSurface::GL_SetColor(GL_Color(1.f, 0.85f, 0.3f, 1.f)); else CSurface::GL_SetColor(GL_Color(1.f, 1.f, 1.f, 1.f));
+            freetype::easy_print(6, x, y, lines[i]);
+            y += lineH;
+        }
+        return;
+    }
     coop::Session* s = CoopGame::GetSession();
     std::string head = "Co-op ";
     std::string net = CoopGame::NetStatus();

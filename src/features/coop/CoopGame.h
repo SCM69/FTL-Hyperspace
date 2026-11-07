@@ -13,6 +13,7 @@ struct Config
 {
     bool enabled = false;
     bool host = false;
+    bool askRole = false;         // role=menu: the player picks host / join / no co-op on the main menu
     std::string addr = "127.0.0.1";
     int port = 27890;
     std::string net = "steam";    // steam (lobby, no address) or tcp (address:port)
@@ -40,6 +41,9 @@ bool InLockstep();                // lockstep running in a game
 bool Applying();                  // true while a networked command is applied
 coop::Session* GetSession();
 std::string NetStatus();          // Steam lobby status line, or a network error; empty for TCP
+bool WaitingForRoleChoice();      // role=menu and nothing chosen yet
+std::vector<std::string> RoleMenuLines();
+bool RoleMenuKey(int sdlKey);     // true if the key was used by the co-op menu
 int LocalSlot();
 void Log(const std::string& line);
 void Logf(const char* fmt, ...)

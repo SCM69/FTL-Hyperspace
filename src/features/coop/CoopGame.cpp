@@ -47,7 +47,9 @@ uint32_t g_catchupFrames = 0;
 static uint32_t g_totalFramesAtRestart = 0; // frames run in earlier epochs
 static uint32_t g_frameEpoch = 0;            // epoch the running frame started in
 static std::string g_pendingResync;          // host: resync requested, runs at the next quiet loop
-static bool g_hostGone = false;              // guest: the host left; play on alone   // extra frames run in the same loop (guest catching up)
+static bool g_hostGone = false;
+static bool g_roleChosen = false;            // role=menu: a choice was made on the main menu
+static void RoleMenuTestKeys();              // guest: the host left; play on alone   // extra frames run in the same loop (guest catching up)
 
 static const float FIXED_SPEED = 16.0f / 60.0f; // FTL: 16 speed units per second, 60 lockstep frames per second
 
@@ -91,8 +93,9 @@ const Config& GetConfig()
         return it != kv.end() ? it->second : def;
     };
     std::string role = get("FTL_COOP", "role", "");
-    if (role != "host" && role != "guest" && role != "solo") return g_cfg;
+    if (role != "host" && role != "guest" && role != "solo" && role != "menu") return g_cfg;
     g_cfg.enabled = true;
+    g_cfg.askRole = role == "menu";
     g_cfg.host = role != "guest";
     if (role == "solo") g_cfg.waitPlayers = 1;
     std::string addr = get("FTL_COOP_ADDR", "address", "127.0.0.1");
@@ -660,6 +663,56 @@ static void HostMaybeStart()
 
 void RequestResyncSoon(const char* why) { g_pendingResync = why; }
 
+// ---------------------------------------------------------------- role menu (role=menu)
+// On the main menu: H host, J join, +/- players, M ship sharing, X no co-op. Keys only act on the main menu.
+
+bool WaitingForRoleChoice() { return g_cfg.enabled && g_cfg.askRole && !g_roleChosen; }
+
+std::vector<std::string> RoleMenuLines()
+{
+    const Config& c = g_cfg;
+    std::vector<std::string> v;
+    v.push_back("FTL Co-op: press a key");
+    v.push_back(c.net == "steam" ? "  H  host a game (friends join your Steam lobby)" : "  H  host a game (port " + std::to_string(c.port) + ")");
+    if (c.net == "steam") v.push_back(c.friendName.empty() ? "  J  join a Steam friend who hosts" : "  J  join " + c.friendName + " (Steam)");
+    else v.push_back("  J  join " + c.addr + ":" + std::to_string(c.port));
+    v.push_back("  + / -  players: " + std::to_string(c.waitPlayers) + (c.waitPlayers ? " (the run starts when all are in; F9 starts early)" : " (F9 starts)"));
+    v.push_back(std::string("  M  ship sharing: ") + (c.mode == Mode::OwnCrew ? "own crew" : "free-for-all"));
+    v.push_back("  X  play without co-op");
+    return v;
+}
+
+bool RoleMenuKey(int key)
+{
+    if (!WaitingForRoleChoice() || !G_->GetCApp()->menu.bOpen) return false;
+    switch (key)
+    {
+    case SDLK_h: g_cfg.host = true; g_roleChosen = true; Log("menu: host"); return true;
+    case SDLK_j: g_cfg.host = false; g_roleChosen = true; Log("menu: join"); return true;
+    case SDLK_x: g_cfg.enabled = false; g_roleChosen = true; Log("menu: no co-op"); return true;
+    case SDLK_m: g_cfg.mode = g_cfg.mode == Mode::OwnCrew ? Mode::FreeForAll : Mode::OwnCrew; Logf("menu: mode %s", g_cfg.mode == Mode::OwnCrew ? "owncrew" : "ffa"); return true;
+    case SDLK_PLUS: case SDLK_EQUALS: case SDLK_KP_PLUS:
+        if (g_cfg.waitPlayers < 8) ++g_cfg.waitPlayers; Logf("menu: players %d", g_cfg.waitPlayers); return true;
+    case SDLK_MINUS: case SDLK_KP_MINUS:
+        if (g_cfg.waitPlayers > 0) --g_cfg.waitPlayers; Logf("menu: players %d", g_cfg.waitPlayers); return true;
+    default: return false;
+    }
+}
+
+// Tests: FTL_COOP_TEST_MENU_KEYS=<keys> presses these keys (one character each) on the main menu, one every 20 loops,
+// through CApp::OnKeyDown like a keyboard.
+static void RoleMenuTestKeys()
+{
+    static std::string keys = Env("FTL_COOP_TEST_MENU_KEYS");
+    static size_t next = 0; static int loops = 0;
+    if (next >= keys.size() || !G_->GetCApp()->menu.bOpen || ++loops % 20 != 0) return;
+    char k = keys[next++];
+    SDLKey key = (SDLKey)(k == '+' ? SDLK_PLUS : (unsigned char)k);
+    Logf("test: menu key %c", k);
+    G_->GetCApp()->OnKeyDown(key);
+    G_->GetCApp()->OnKeyUp(key);
+}
+
 // A save taken during a jump (readyToTravel set, or the jump running) or with an event dialog open did not load the
 // same on every copy (host at location 6, guest at 3 after a save one frame into a jump, 2026-11-06). Wait for a
 // quiet moment.
@@ -720,7 +773,13 @@ int BeforeLoop()
     static uint32_t loopsTotal = 0;
     if (++loopsTotal % 1800 == 0 && g_session) Logf("heartbeat loop=%u frame=%u lockstep=%d stage=%d", loopsTotal, g_session->Frame(), (int)g_inLockstep, (int)g_startStage);
     static bool inited = false;
-    if (!inited) { inited = true; CoopRng::MarkMainThread(); InitSession(); }
+    if (!inited && g_cfg.askRole && !g_roleChosen)
+    {
+        CoopRng::MarkMainThread();
+        RoleMenuTestKeys();
+        return 1;   // the main menu works as usual until the player picks
+    }
+    if (!inited) { inited = true; CoopRng::MarkMainThread(); if (Active()) InitSession(); }
     if (!Active() || !g_session) return 1;
     // Guest: (re)connect every 3 seconds until the host answers (it may start later than we do).
     if (g_tcp && !GetConfig().host && !g_tcp->Connected() && !g_session->Started())
@@ -919,6 +978,7 @@ HOOK_METHOD(CApp, OnInputFocus, () -> void)
 HOOK_METHOD(CApp, OnKeyDown, (SDLKey key) -> void)
 {
     LOG_HOOK("HOOK_METHOD -> CApp::OnKeyDown -> Begin (CoopGame.cpp)\n")
+    if (CoopGame::RoleMenuKey((int)key)) return;
     if (CoopGame::Active() && key == SDLK_F9) { CoopGame::RequestManualStart(); return; }
     if (CoopGame::Active() && key == SDLK_F10) { CoopGame::RequestResync("F10"); return; }
     if (CoopGame::Active() && key == SDLK_F11 && CoopGame::GetSession() && CoopGame::GetSession()->IsHost())

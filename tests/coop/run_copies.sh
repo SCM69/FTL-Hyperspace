@@ -74,6 +74,12 @@ for ((i=0; i<N; i++)); do
     export FTL_COOP_NAME="bot$i" FTL_COOP_PLAYERS=$PLAYERS FTL_COOP_MODE=$MODE FTL_COOP_SEED=$SEED FTL_COOP_BOT=$BOT
     export FTL_COOP_USERDIR="$C/user/" FTL_COOP_LOG="$C/coop.log" FTL_COOP_EXIT_AFTER=$FRAMES FTL_COOP_BUILD_ID=$BUILD_ID
     export HYPERSPACE_SKIP_BUG_REPORT=1 HYPERSPACE_FORCE_EXIT_ON_FREEZE=1 HYPERSPACE_NO_DIALOGS=1
+    # COOP_MENU=1: every copy starts with role=menu and picks on the main menu through key presses (host: players up and
+    # down, sharing mode twice, then H; guests: J), testing the in-game host/join panel.
+    if [ "${COOP_MENU:-0}" = 1 ] && [ "$ROLE" != solo ]; then
+      export FTL_COOP=menu
+      if [ "$ROLE" = host ]; then export FTL_COOP_TEST_MENU_KEYS="=-mmh"; else export FTL_COOP_TEST_MENU_KEYS="j"; fi
+    fi
     if [ $WIN = 1 ]; then
       # Wine sees the Linux file system as drive Z:.
       export FTL_COOP_USERDIR="Z:$C/user/" FTL_COOP_LOG="Z:$C/coop.log" WINEDLLOVERRIDES="${WINEDLLOVERRIDES-xinput1_4=n,b}"
