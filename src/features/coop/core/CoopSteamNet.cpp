@@ -150,6 +150,10 @@ void SteamTransport::HostPoll()
         m_state = State::Open;
         m_status = "Steam lobby open: friends set role=guest and start FTL";
         Log("Steam: lobby " + std::to_string(m_lobby) + " open");
+        // Read it back: says in the log whether Steam stored what we set (owner, members, data).
+        std::vector<uint64_t> members = m_api->Members(m_lobby);
+        Log("Steam: lobby check: owner is me " + std::to_string(m_api->Owner(m_lobby) == m_api->Me()) + ", members " +
+            std::to_string(members.size()) + ", ftlcoop=" + m_api->GetData(m_lobby, "ftlcoop") + ", build=" + m_api->GetData(m_lobby, "build"));
     }
     if (m_state != State::Open) return;
     double now = Now();
@@ -240,6 +244,7 @@ void SteamTransport::GuestPoll()
 
 void SteamTransport::Poll()
 {
+    m_api->Tick();
     if (m_isHost) HostPoll(); else GuestPoll();
     // Incoming packets.
     Bytes pkt; uint64_t from = 0;

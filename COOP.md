@@ -16,7 +16,10 @@ Windows players by running the Windows game through Proton.
 Steam lobbies (default, `net=steam`), 2026-11-06: unit test with a fake Steam (tests/coop/steamnet_test.cpp, 12/12)
 and real game copies over the Steam transport with tests/coop/fakesteam_hub.py standing in for Steam (all PASS):
 Linux 2 copies fight, 4 copies chaos own-crew; Windows under Proton 2 copies fight, 8 copies chaos own-crew, late join
-(third player after 20 s) with 80 ms hub lag. Not yet tested between two real Steam accounts.
+(third player after 20 s) with 80 ms hub lag. Real Steam, one account (2026-11-06): the host creates the friends-only
+lobby and reads back owner, members and data (Linux native, and Windows under Proton); the guest reads the friends list.
+Windows FTL 1.6.9 has no Steam code of its own, so there the mod loads steam_api.dll (from the FTL folder), calls
+SteamAPI_Init for app 212680 and pumps SteamAPI_RunCallbacks. Not yet tested between two real Steam accounts.
 
 Windows under Proton, 2026-11-06 (tests/coop/batch.sh with BATCH_WIN=1, all PASS): 2 copies fight, 4 copies fight
 own-crew, 2 specials, 2 keys, 2 captain (ffa and own-crew, with the captain resync), 4 and 8 copies chaos, late join

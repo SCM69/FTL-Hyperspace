@@ -18,6 +18,7 @@ class SteamApi
 {
 public:
     virtual ~SteamApi() {}
+    virtual void Tick() {}   // once per poll (pumps Steam when nobody else does)
     virtual uint64_t Me() = 0;
     virtual std::string Name(uint64_t user) = 0;
     // Asynchronous calls return a handle (0 = the call failed at once). CallResult: 0 still running, 1 done (lobby

@@ -9,6 +9,7 @@
 #include "CoopSteam.h"
 #include "CoopGame.h"
 
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #ifdef _WIN32
@@ -73,7 +74,11 @@ struct Fns
 static void* Sym(const char* name)
 {
 #ifdef _WIN32
-    HMODULE m = GetModuleHandleA("steam_api.dll");
+    // Windows FTL 1.6.9 (the version Hyperspace needs) has no Steam code: it never loads steam_api.dll, so we do.
+    // The DLL comes with the Steam install of FTL, next to FTLGame.exe.
+    static HMODULE m = nullptr;
+    if (!m) m = GetModuleHandleA("steam_api.dll");
+    if (!m) m = LoadLibraryA("steam_api.dll");
     return m ? (void*)GetProcAddress(m, name) : nullptr;
 #else
     return dlsym(RTLD_DEFAULT, name);
@@ -119,8 +124,27 @@ public:
         LOAD(CloseP2PSessionWithUser, "SteamAPI_ISteamNetworking_CloseP2PSessionWithUser");
         LOAD(AllowP2PPacketRelay, "SteamAPI_ISteamNetworking_AllowP2PPacketRelay");
 #undef LOAD
-        if (!missing.empty()) { *err = "FTL's Steam library lacks:" + missing; return false; }
+        if (!missing.empty())
+        {
+            *err = Sym("SteamAPI_Init") ? "FTL's Steam library lacks:" + missing : "steam_api.dll is not in the FTL folder";
+            return false;
+        }
         int hUser = f.GetHSteamUser(), hPipe = f.GetHSteamPipe();
+        if (!hUser || !hPipe)
+        {
+            // The game did not start Steam (Windows 1.6.9): start it ourselves for app 212680 and pump its callbacks.
+            bool (*init)() = nullptr;
+            *(void**)&init = Sym("SteamAPI_Init");
+            *(void**)&m_runCallbacks = Sym("SteamAPI_RunCallbacks");
+#ifdef _WIN32
+            if (!getenv("SteamAppId")) SetEnvironmentVariableA("SteamAppId", "212680");
+            if (!getenv("SteamGameId")) SetEnvironmentVariableA("SteamGameId", "212680");
+#endif
+            bool ok = init && init();
+            CoopGame::Logf("Steam: the game had not started Steam; SteamAPI_Init %s", ok ? "ok" : "failed");
+            if (!ok) { *err = "could not start Steam (is Steam running and signed in?)"; return false; }
+            hUser = f.GetHSteamUser(); hPipe = f.GetHSteamPipe();
+        }
         if (!hUser || !hPipe) { *err = "Steam is not running for this game (start Steam, then FTL)"; return false; }
         void* client = f.Client();
         auto get = [&](const char* ver, int kind) -> void* {
@@ -153,6 +177,7 @@ public:
         return true;
     }
 
+    void Tick() override { if (m_runCallbacks) m_runCallbacks(); }
     uint64_t Me() override { return m_me; }
     std::string Name(uint64_t u) override
     {
@@ -205,6 +230,8 @@ public:
             if ((uint32_t)(g.gameId & 0xffffff) != kFtlAppId || !g.lobby) continue;
             v.push_back(FriendLobby{ fr, g.lobby, Name(fr) });
         }
+        static bool logged = false;
+        if (!logged) { logged = true; CoopGame::Logf("Steam: friends list has %d friends, %zu in an FTL lobby", n, v.size()); }
         return v;
     }
     bool Send(uint64_t user, const uint8_t* d, uint32_t n) override { return f.SendP2PPacket(m_net, user, d, n, 2 /* reliable */, 0); }
@@ -224,6 +251,7 @@ public:
 
 private:
     Fns f = {};
+    void (*m_runCallbacks)() = nullptr;   // set when we started Steam ourselves
     void *m_user = nullptr, *m_friends = nullptr, *m_utils = nullptr, *m_mm = nullptr, *m_net = nullptr;
     uint64_t m_me = 0;
 };
